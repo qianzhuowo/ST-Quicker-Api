@@ -48,6 +48,142 @@
     flex: 1 1 14rem;
 }
 
+.quicker-api__url-row {
+    flex-wrap: nowrap;
+}
+
+.quicker-api__url-row > #quicker_api_url {
+    min-width: 0;
+}
+
+.quicker-api__quick-url-menu {
+    position: fixed;
+    z-index: 10020;
+    display: flex;
+    max-height: min(70dvh, 34rem);
+    overflow-x: hidden;
+    overflow-y: auto;
+    flex-direction: column;
+    gap: 0.2rem;
+    padding: 0.45rem;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 9px;
+    background: var(--SmartThemeBlurTintColor);
+    box-shadow: 0 0.55rem 1.5rem rgb(0 0 0 / 35%);
+    color: var(--SmartThemeBodyColor);
+}
+
+.quicker-api__quick-url-heading {
+    padding: 0.35rem 0.45rem 0.2rem;
+    font-size: 0.78em;
+    font-weight: 700;
+    opacity: 0.72;
+}
+
+.quicker-api__quick-url-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: stretch;
+    gap: 0.2rem;
+}
+
+.quicker-api__quick-url-select,
+.quicker-api__quick-url-delete,
+.quicker-api__quick-url-add {
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+}
+
+.quicker-api__quick-url-select {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(5.5rem, auto) minmax(0, 1fr);
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.45rem 0.55rem;
+    text-align: left;
+}
+
+.quicker-api__quick-url-select strong,
+.quicker-api__quick-url-select small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__quick-url-select small {
+    opacity: 0.68;
+}
+
+.quicker-api__quick-url-delete {
+    width: 2.25rem;
+    padding: 0;
+    color: var(--quicker-api-danger, #ff6673);
+}
+
+.quicker-api__quick-url-add {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-height: 2.3rem;
+    margin-top: 0.2rem;
+    border-color: var(--SmartThemeBorderColor);
+}
+
+.quicker-api__quick-url-select:hover,
+.quicker-api__quick-url-select:focus-visible,
+.quicker-api__quick-url-delete:hover,
+.quicker-api__quick-url-delete:focus-visible,
+.quicker-api__quick-url-add:hover,
+.quicker-api__quick-url-add:focus-visible {
+    border-color: var(--SmartThemeQuoteColor);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+    outline: none;
+}
+
+.quicker-api__quick-url-editor {
+    display: grid;
+    width: min(32rem, calc(100dvw - 4rem));
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    gap: 0.75rem;
+    text-align: left;
+}
+
+.quicker-api__quick-url-editor label {
+    display: grid;
+    max-width: 100%;
+    min-width: 0;
+    gap: 0.3rem;
+    font-weight: 600;
+}
+
+.quicker-api__quick-url-editor .text_pole {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+.quicker-api__exclude-only-popup {
+    min-height: min(32rem, 70dvh);
+}
+
+.quicker-api__exclude-only-hint {
+    display: block;
+    margin: 0 0 0.65rem;
+    opacity: 0.75;
+}
+
+.quicker-api__exclude-only-popup #custom_exclude_body {
+    min-height: 14rem;
+}
+
 .quicker-api__key-input {
     min-width: 14rem;
     flex: 1 1 18rem;
@@ -776,6 +912,21 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
 .quicker-api__placement-choices .menu_button.is-selected {
     border-color: var(--SmartThemeQuoteColor);
     background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+}
+
+@media (max-width: 560px) {
+    .quicker-api__url-row {
+        flex-wrap: wrap;
+    }
+
+    .quicker-api__url-row > #quicker_api_quick_url {
+        flex: 1 1 100%;
+    }
+
+    .quicker-api__quick-url-select {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0.15rem;
+    }
 }
 
 @media (max-width: 760px) {

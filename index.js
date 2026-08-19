@@ -3,11 +3,28 @@ import { chat_completion_sources, oai_settings, proxies } from '../../../openai.
 import { SECRET_KEYS, secret_state } from '../../../secrets.js';
 import { Popup, POPUP_TYPE } from '../../../popup.js';
 import { eventSource, event_types, getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
+import { yaml } from '../../../../lib.js';
 
 const MODULE_NAME = 'quickerApi';
 const LEGACY_MODULE_NAME = 'customOpenAIProfiles';
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 12;
 const EMPTY_SECRET_LABEL = 'Quicker Api · No key';
+const BUILTIN_QUICK_URLS = Object.freeze([
+    { name: 'OpenAI', url: 'https://api.openai.com/v1' },
+    { name: 'OpenRouter', url: 'https://openrouter.ai/api/v1' },
+    { name: 'DeepSeek', url: 'https://api.deepseek.com/beta' },
+    { name: 'Groq', url: 'https://api.groq.com/openai/v1' },
+    { name: 'Mistral AI', url: 'https://api.mistral.ai/v1' },
+    { name: 'xAI', url: 'https://api.x.ai/v1' },
+    { name: 'Chutes', url: 'https://llm.chutes.ai/v1' },
+    { name: 'Moonshot', url: 'https://api.moonshot.ai/v1' },
+    { name: 'Fireworks', url: 'https://api.fireworks.ai/inference/v1' },
+    { name: 'SiliconFlow', url: 'https://api.siliconflow.com/v1' },
+    { name: 'SiliconFlow CN', url: 'https://api.siliconflow.cn/v1' },
+    { name: 'AIML API', url: 'https://api.aimlapi.com/v1' },
+    { name: 'NanoGPT', url: 'https://nano-gpt.com/api/v1' },
+    { name: 'CometAPI', url: 'https://api.cometapi.com/v1' },
+]);
 const SUPPORTED_SOURCES = new Set([
     chat_completion_sources.CUSTOM,
     chat_completion_sources.CLAUDE,
@@ -56,6 +73,7 @@ const DEFAULT_SETTINGS = {
     blockedSecretKeys: {},
     quickActions: [],
     quickActionPlacement: 'leftSendForm',
+    quickUrls: [],
 };
 
 let operationQueue = Promise.resolve();
@@ -78,6 +96,7 @@ let quickActionPopper = null;
 let quickActionPlacementPopup = null;
 let quickActionObserver = null;
 let quickActionRenderPending = false;
+let quickUrlMenu = null;
 const nativePresetCaptureHandlers = {};
 const ownedPopups = new Set();
 const activeFetchControllers = new Set();
@@ -155,6 +174,14 @@ function normalizeQuickAction(raw, index = 0) {
     };
 }
 
+function normalizeQuickUrl(raw) {
+    return {
+        id: normalizeText(raw?.id) || makeId('quick-url'),
+        name: sanitizeName(raw?.name),
+        url: String(raw?.url || '').trim().slice(0, 2048),
+    };
+}
+
 function normalizeProfile(raw) {
     const format = normalizeFormat(raw?.format);
     const model = String(raw?.model || '').slice(0, 500);
@@ -175,7 +202,7 @@ function normalizeProfile(raw) {
             ? String(raw?.fetchedFromEndpoint || (raw?.fetchedModels?.length ? raw?.endpoint : '') || '').slice(0, 2048)
             : '',
         includeBody: format === 'openai' ? String(raw?.includeBody || '').slice(0, 100000) : '',
-        excludeBody: format === 'openai' ? String(raw?.excludeBody || '').slice(0, 100000) : '',
+        excludeBody: String(raw?.excludeBody || '').slice(0, 100000),
         includeHeaders: format === 'openai' ? String(raw?.includeHeaders || '').slice(0, 100000) : '',
         secretId: String(raw?.secretId || ''),
         proxyPreset: String(raw?.proxyPreset || ''),
@@ -228,6 +255,14 @@ function initializeSettings() {
         ? value.quickActions.map(normalizeQuickAction).filter(action => action.preset || action.profileId || action.model)
         : [];
     value.quickActions.sort((a, b) => a.sequence - b.sequence).forEach((action, index) => { action.sequence = index; });
+    value.quickUrls = Array.isArray(value.quickUrls)
+        ? value.quickUrls.map(normalizeQuickUrl).filter(item => item.name && isValidQuickUrl(item.url))
+        : [];
+    const seenQuickUrlIds = new Set();
+    value.quickUrls.forEach(item => {
+        if (seenQuickUrlIds.has(item.id)) item.id = makeId('quick-url');
+        seenQuickUrlIds.add(item.id);
+    });
     for (const key of Object.keys(value.blockedSecretKeys)) {
         if (!Object.values(FORMATS).some(config => config.secretKey === key)) delete value.blockedSecretKeys[key];
     }
@@ -276,7 +311,10 @@ function toolbarHtml() {
             </div>
             <div class="quicker-api__field">
                 <label for="quicker_api_url">URL</label>
-                <input id="quicker_api_url" class="text_pole" type="url" autocomplete="off" placeholder="Custom 必填；Anthropic / Gemini 留空使用官方端点" />
+                <div class="quicker-api__row quicker-api__url-row">
+                    <input id="quicker_api_url" class="text_pole" type="url" autocomplete="off" placeholder="Custom 必填；Anthropic / Gemini 留空使用官方端点" />
+                    <button id="quicker_api_quick_url" class="menu_button quicker-api__text-button" type="button" title="从常用端点中快捷填入 URL" aria-haspopup="menu" aria-expanded="false"><i class="fa-solid fa-link"></i><span>快捷 URL</span><i class="fa-solid fa-caret-down"></i></button>
+                </div>
             </div>
             <div class="quicker-api__field">
                 <label for="quicker_api_key_input">Key / Password</label>
@@ -290,6 +328,12 @@ function toolbarHtml() {
             <div class="quicker-api__field">
                 <label>模型</label>
                 <div id="quicker_api_model_control" class="quicker-api__row"></div>
+            </div>
+            <div class="quicker-api__field">
+                <label>参数</label>
+                <div class="quicker-api__row">
+                    <button id="quicker_api_additional_parameters" class="menu_button quicker-api__text-button" type="button" title="打开 SillyTavern 原生附加参数编辑器"><i class="fa-solid fa-sliders"></i><span>附加参数</span></button>
+                </div>
             </div>
             <div id="quicker_api_status" class="quicker-api__status"></div>
         </section>`;
@@ -347,6 +391,29 @@ function syncEditorConnectionToNative() {
     oai_settings[config.endpointField] = endpoint;
     $(config.endpointInput).val(endpoint).trigger('input');
     syncEditorModelToNative();
+}
+
+function nativeAdditionalParameters() {
+    return {
+        includeBody: String(oai_settings.custom_include_body || ''),
+        excludeBody: String(oai_settings.custom_exclude_body || ''),
+        includeHeaders: String(oai_settings.custom_include_headers || ''),
+    };
+}
+
+function applyNativeAdditionalParameters(profile) {
+    const values = {
+        '#custom_include_body': String(profile?.includeBody || ''),
+        '#custom_exclude_body': String(profile?.excludeBody || ''),
+        '#custom_include_headers': String(profile?.includeHeaders || ''),
+    };
+    oai_settings.custom_include_body = values['#custom_include_body'];
+    oai_settings.custom_exclude_body = values['#custom_exclude_body'];
+    oai_settings.custom_include_headers = values['#custom_include_headers'];
+    for (const [selector, value] of Object.entries(values)) {
+        const input = $(selector);
+        if (input.length) input.val(value).trigger('input');
+    }
 }
 
 function renderModelControl(profile = selectedProfile(), modelOverride = null) {
@@ -409,10 +476,11 @@ function profileMatchesNative(profile) {
         const proxyPreset = getBoundProxyPreset(profile);
         if (!proxyPreset || String(oai_settings.proxy_password || '') !== String(proxyPreset.password || '')) return false;
     }
+    const additional = nativeAdditionalParameters();
+    if (additional.excludeBody !== profile.excludeBody) return false;
     return profile.format !== 'openai'
-        || (String(oai_settings.custom_include_body || '') === profile.includeBody
-            && String(oai_settings.custom_exclude_body || '') === profile.excludeBody
-            && String(oai_settings.custom_include_headers || '') === profile.includeHeaders);
+        || (additional.includeBody === profile.includeBody
+            && additional.includeHeaders === profile.includeHeaders);
 }
 
 function getBlockedSecretMessage(key) {
@@ -421,9 +489,13 @@ function getBlockedSecretMessage(key) {
 
 function editorHasUnsavedChanges(profile) {
     if (!profile) return false;
+    const additional = nativeAdditionalParameters();
     return normalizeFormat($('#quicker_api_format').val()) !== profile.format
         || normalizeText($('#quicker_api_url').val()) !== normalizeText(profile.endpoint)
         || getEditorModel() !== editorModelBaseline
+        || additional.excludeBody !== profile.excludeBody
+        || (profile.format === 'openai' && (additional.includeBody !== profile.includeBody
+            || additional.includeHeaders !== profile.includeHeaders))
         || Boolean(normalizeText($('#quicker_api_key_input').val()));
 }
 
@@ -475,6 +547,28 @@ function endPresetTransition({ force = false } = {}) {
     $('#api_button_openai').prop('disabled', presetConnectWasDisabled);
 }
 
+function requestMatchesProfile(profile, generateData) {
+    if (!profile || generateData.chat_completion_source !== FORMATS[profile.format].source) return false;
+    if (String(generateData.model || '') !== profile.model) return false;
+    const endpointField = profile.format === 'openai' ? 'custom_url' : 'reverse_proxy';
+    return normalizeText(generateData[endpointField]) === normalizeText(profile.endpoint);
+}
+
+function excludeProfileBodyParameters(profile, generateData) {
+    if (!profile?.excludeBody || !requestMatchesProfile(profile, generateData)) return;
+    try {
+        const parsed = yaml.parse(profile.excludeBody);
+        const keys = Array.isArray(parsed)
+            ? parsed
+            : (parsed && typeof parsed === 'object' ? Object.keys(parsed) : [parsed]);
+        for (const key of keys) {
+            if (typeof key === 'string' && key) delete generateData[key];
+        }
+    } catch (error) {
+        console.warn('[QuickerApi] Invalid exclude-body YAML; request was left unchanged:', error);
+    }
+}
+
 function guardGenerationWhenBlocked(generateData) {
     if (extensionDisabled || !generateData || typeof generateData !== 'object') return;
     if (presetTransitionBlocked) {
@@ -487,11 +581,16 @@ function guardGenerationWhenBlocked(generateData) {
     const format = Object.values(FORMATS).find(config => config.source === generateData.chat_completion_source);
     if (!format) return;
     const usesProxyCredential = format.source !== chat_completion_sources.CUSTOM && Boolean(generateData.reverse_proxy);
-    if (usesProxyCredential || !settings().blockedSecretKeys[format.secretKey]) return;
-    generateData.chat_completion_source = 'quicker_api_safety_blocked';
-    generateData.custom_url = '';
-    generateData.reverse_proxy = '';
-    toastr.error(settings().blockedSecretKeys[format.secretKey]);
+    const blockedMessage = settings().blockedSecretKeys[format.secretKey];
+    if (!usesProxyCredential && blockedMessage) {
+        generateData.chat_completion_source = 'quicker_api_safety_blocked';
+        generateData.custom_url = '';
+        generateData.reverse_proxy = '';
+        toastr.error(blockedMessage);
+        return;
+    }
+    const profile = profiles().find(item => item.id === settings().activeProfileId) || null;
+    excludeProfileBodyParameters(profile, generateData);
 }
 
 function enqueueOperation(operation) {
@@ -612,6 +711,11 @@ function restoreNative(snapshot) {
     oai_settings.proxy_password = snapshot.proxy_password;
     $('#custom_api_url_text').val(snapshot.custom_url).trigger('input');
     $('#custom_model_id').val(snapshot.custom_model).trigger('input');
+    applyNativeAdditionalParameters({
+        includeBody: snapshot.custom_include_body,
+        excludeBody: snapshot.custom_exclude_body,
+        includeHeaders: snapshot.custom_include_headers,
+    });
     $('#openai_reverse_proxy').val(snapshot.reverse_proxy).trigger('input');
     $('#openai_proxy_password').val(snapshot.proxy_password).trigger('input');
     $('#model_claude_select').val(snapshot.claude_model).trigger('change');
@@ -669,11 +773,8 @@ function applyNativeFields(profile, proxyPassword = '', applyModel = true) {
         oai_settings[config.modelField] = profile.model;
         $(config.modelInput).val(profile.model).trigger(profile.format === 'openai' ? 'input' : 'change');
     }
-    if (profile.format === 'openai') {
-        oai_settings.custom_include_body = profile.includeBody;
-        oai_settings.custom_exclude_body = profile.excludeBody;
-        oai_settings.custom_include_headers = profile.includeHeaders;
-    } else {
+    applyNativeAdditionalParameters(profile);
+    if (profile.format !== 'openai') {
         oai_settings.proxy_password = proxyPassword;
         $('#openai_proxy_password').val(proxyPassword).trigger('input');
     }
@@ -844,9 +945,9 @@ function captureNativeProfile(name, format, existing = {}) {
         format: normalizedFormat,
         endpoint,
         model: getEditorModel(normalizedFormat),
-        includeBody: normalizedFormat === 'openai' ? oai_settings.custom_include_body : '',
-        excludeBody: normalizedFormat === 'openai' ? oai_settings.custom_exclude_body : '',
-        includeHeaders: normalizedFormat === 'openai' ? oai_settings.custom_include_headers : '',
+        includeBody: normalizedFormat === 'openai' ? String(oai_settings.custom_include_body || '') : '',
+        excludeBody: String(oai_settings.custom_exclude_body || ''),
+        includeHeaders: normalizedFormat === 'openai' ? String(oai_settings.custom_include_headers || '') : '',
         secretId,
         proxyPreset,
         needsSecret,
@@ -874,6 +975,133 @@ async function promptName(message, initialValue = '') {
     const result = await callQuickerPopup(message, POPUP_TYPE.INPUT, initialValue);
     if (result === null || result === false || result === undefined) return null;
     return sanitizeName(result) || null;
+}
+
+function isValidQuickUrl(value) {
+    try {
+        const parsed = new URL(String(value || '').trim());
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+function closeQuickUrlMenu() {
+    quickUrlMenu?.remove();
+    quickUrlMenu = null;
+    $('#quicker_api_quick_url').attr('aria-expanded', 'false');
+    $(document).off('.quickerApiQuickUrl');
+    $(window).off('.quickerApiQuickUrl');
+    $(globalThis.visualViewport).off('.quickerApiQuickUrl');
+}
+
+function positionQuickUrlMenu() {
+    if (!quickUrlMenu?.length) return;
+    const button = document.getElementById('quicker_api_quick_url');
+    if (!button) return closeQuickUrlMenu();
+    const rect = button.getBoundingClientRect();
+    const margin = 8;
+    const viewportWidth = globalThis.visualViewport?.width || window.innerWidth;
+    const viewportHeight = globalThis.visualViewport?.height || window.innerHeight;
+    const menuWidth = Math.min(Math.max(rect.width, 300), viewportWidth - margin * 2);
+    quickUrlMenu.css({ width: `${menuWidth}px`, left: '0px', top: '0px' });
+    const menuHeight = quickUrlMenu.outerHeight();
+    const left = Math.min(Math.max(margin, rect.right - menuWidth), viewportWidth - menuWidth - margin);
+    const fitsBelow = rect.bottom + menuHeight + margin <= viewportHeight;
+    const top = fitsBelow ? rect.bottom + 4 : Math.max(margin, rect.top - menuHeight - 4);
+    quickUrlMenu.css({ left: `${left}px`, top: `${top}px` });
+}
+
+function fillQuickUrl(url) {
+    $('#quicker_api_url').val(url).trigger('input').trigger('focus');
+    closeQuickUrlMenu();
+}
+
+async function addCustomQuickUrl() {
+    closeQuickUrlMenu();
+    const content = $('<div class="quicker-api__quick-url-editor">').append(
+        $('<label>').append(
+            $('<span>').text('简称'),
+            $('<input class="text_pole" type="text" autocomplete="off" maxlength="120" placeholder="例如：我的反代">'),
+        ),
+        $('<label>').append(
+            $('<span>').text('URL'),
+            $('<input class="text_pole" type="url" autocomplete="off" maxlength="2048" placeholder="https://example.com/v1">'),
+        ),
+    );
+    const confirmed = await callQuickerPopup(content, POPUP_TYPE.CONFIRM, '', {
+        okButton: '添加', cancelButton: '取消', animation: 'none',
+    });
+    if (!confirmed) return;
+    const [nameInput, urlInput] = content.find('input').get();
+    const name = sanitizeName(nameInput?.value);
+    const url = normalizeText(urlInput?.value).slice(0, 2048);
+    if (!name) return toastr.warning('快捷 URL 简称不能为空。');
+    if (!isValidQuickUrl(url)) return toastr.warning('请输入有效的 http:// 或 https:// URL。');
+    if (settings().quickUrls.some(item => item.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        return toastr.warning('已存在同名的自定义快捷 URL。');
+    }
+    settings().quickUrls.push(normalizeQuickUrl({ id: makeId('quick-url'), name, url }));
+    saveSettingsDebounced();
+    toastr.success(`已添加快捷 URL：${name}`);
+}
+
+function quickUrlItem(item, custom = false) {
+    const row = $('<div class="quicker-api__quick-url-item" role="none">');
+    const select = $('<button class="quicker-api__quick-url-select" type="button" role="menuitem">')
+        .attr('title', item.url)
+        .append($('<strong>').text(item.name), $('<small>').text(item.url))
+        .on('click', () => fillQuickUrl(item.url));
+    row.append(select);
+    if (custom) {
+        row.append($('<button class="quicker-api__quick-url-delete" type="button" aria-label="删除自定义快捷 URL" title="删除">')
+            .append('<i class="fa-solid fa-trash"></i>')
+            .on('click', event => {
+                event.stopPropagation();
+                settings().quickUrls = settings().quickUrls.filter(candidate => candidate.id !== item.id);
+                saveSettingsDebounced();
+                openQuickUrlMenu();
+            }));
+    }
+    return row;
+}
+
+function openQuickUrlMenu() {
+    closeQuickUrlMenu();
+    const menu = $('<div class="quicker-api__quick-url-menu" role="menu" aria-label="快捷 URL">');
+    menu.append($('<div class="quicker-api__quick-url-heading">').text('SillyTavern 原生服务端点'));
+    BUILTIN_QUICK_URLS.forEach(item => menu.append(quickUrlItem(item)));
+    if (settings().quickUrls.length) {
+        menu.append($('<div class="quicker-api__quick-url-heading">').text('自定义'));
+        settings().quickUrls.forEach(item => menu.append(quickUrlItem(item, true)));
+    }
+    menu.append($('<button class="quicker-api__quick-url-add" type="button" role="menuitem">')
+        .append('<i class="fa-solid fa-plus"></i>', $('<span>').text('添加快捷 URL'))
+        .on('click', () => void addCustomQuickUrl()));
+    menu.on('pointerdown mousedown click', event => {
+        event.stopPropagation();
+        if (event.type === 'mousedown') event.preventDefault();
+    });
+    quickUrlMenu = menu.appendTo(document.body);
+    $('#quicker_api_quick_url').attr('aria-expanded', 'true');
+    positionQuickUrlMenu();
+    $(document)
+        .on('pointerdown.quickerApiQuickUrl', event => {
+            if (!$(event.target).closest('.quicker-api__quick-url-menu, #quicker_api_quick_url').length) closeQuickUrlMenu();
+        })
+        .on('keydown.quickerApiQuickUrl', event => {
+            if (event.key === 'Escape') {
+                closeQuickUrlMenu();
+                $('#quicker_api_quick_url').trigger('focus');
+            }
+        });
+    $(window).on('resize.quickerApiQuickUrl scroll.quickerApiQuickUrl', positionQuickUrlMenu);
+    $(globalThis.visualViewport).on('resize.quickerApiQuickUrl scroll.quickerApiQuickUrl', positionQuickUrlMenu);
+}
+
+function toggleQuickUrlMenu() {
+    if (quickUrlMenu) closeQuickUrlMenu();
+    else openQuickUrlMenu();
 }
 
 function createProfile() {
@@ -926,6 +1154,9 @@ async function collectNativeImportCandidates(authoritative) {
             name: sanitizeName(candidate.name) || '原生连接配置',
             endpoint,
             model: normalizeText(candidate.model),
+            includeBody: format === 'openai' ? String(candidate.includeBody || '') : '',
+            excludeBody: format === 'openai' ? String(candidate.excludeBody || '') : '',
+            includeHeaders: format === 'openai' ? String(candidate.includeHeaders || '') : '',
             sourceSecretId: String(candidate.sourceSecretId || ''),
             credential,
             identity: importIdentity(format, endpoint, credential.identity),
@@ -933,6 +1164,20 @@ async function collectNativeImportCandidates(authoritative) {
         };
         if (!candidates.some(item => item.identity === normalized.identity)) candidates.push(normalized);
     };
+
+    const activeCustom = authoritative[SECRET_KEYS.CUSTOM]?.find(entry => entry.active) || null;
+    const currentCustomUrl = normalizeText(oai_settings.custom_url);
+    if (currentCustomUrl || oai_settings.custom_model || activeCustom) {
+        await add({
+            sourceRef: 'current-custom', sourceLabel: '当前自定义（兼容 OpenAI）',
+            name: '当前 Custom 配置', format: 'openai', endpoint: currentCustomUrl,
+            model: oai_settings.custom_model, sourceSecretKey: SECRET_KEYS.CUSTOM,
+            sourceSecretId: activeCustom?.id,
+            includeBody: oai_settings.custom_include_body,
+            excludeBody: oai_settings.custom_exclude_body,
+            includeHeaders: oai_settings.custom_include_headers,
+        });
+    }
 
     const activeOpenAI = authoritative[SECRET_KEYS.OPENAI]?.find(entry => entry.active) || null;
     const reverseProxy = normalizeText(oai_settings.reverse_proxy);
@@ -1057,6 +1302,8 @@ async function importNativeProfile() {
             profiles().push(normalizeProfile({
                 id: makeId(), name: uniqueName(candidate.name), format: candidate.format,
                 endpoint: candidate.endpoint, model: candidate.model,
+                includeBody: candidate.includeBody, excludeBody: candidate.excludeBody,
+                includeHeaders: candidate.includeHeaders,
                 secretId: credential.secretId, proxyPreset: credential.proxyPreset,
                 needsSecret: credential.needsSecret,
                 nativeImportFingerprint: candidate.fingerprint,
@@ -2405,6 +2652,8 @@ function bindEvents() {
         renderStatus();
     });
     $('#quicker_api_new').on('click', createProfile);
+    $('#quicker_api_quick_url').on('click', toggleQuickUrlMenu);
+    $('#quicker_api_additional_parameters').on('click', () => $('#customize_additional_parameters').trigger('click'));
     $('#quicker_api_save').on('click', () => void enqueueOperation(saveSelectedProfile));
     $('#quicker_api_rename').on('click', renameSelectedProfile);
     $('#quicker_api_copy').on('click', copySelectedProfile);
@@ -2425,6 +2674,7 @@ function bindEvents() {
         renderStatus();
     });
     $('#quicker_api_key_input').on('input', renderStatus);
+    $(document).on('input.quickerApi', '#custom_include_body, #custom_exclude_body, #custom_include_headers', renderStatus);
     $(document).on('change.quickerApi', '#quicker_api_custom_model, #quicker_api_provider_model', () => {
         syncEditorModelToNative();
         renderStatus();
@@ -2447,9 +2697,32 @@ function bindEvents() {
     ensureQuickActionEntries();
 }
 
+function updateAdditionalParametersButton() {
+    const supported = SUPPORTED_SOURCES.has(String($('#chat_completion_source').val()));
+    $('#quicker_api_additional_parameters').toggle(supported);
+}
+
+function configureAdditionalParametersPopup() {
+    const excludeInput = document.getElementById('custom_exclude_body');
+    if (!excludeInput || excludeInput.dataset.quickerApiConfigured === 'true') return;
+    excludeInput.dataset.quickerApiConfigured = 'true';
+    const format = normalizeFormat($('#quicker_api_format').val());
+    if (format === 'openai') return;
+    const root = $(excludeInput).closest('.height100p');
+    root.addClass('quicker-api__exclude-only-popup');
+    root.children('h3').removeAttr('data-i18n').text('排除主体参数');
+    root.find('#custom_include_body, #custom_include_headers')
+        .closest('.flex1.flex-container.flexFlowColumn')
+        .hide();
+    $('<small class="quicker-api__exclude-only-hint">')
+        .text('这些顶层字段会在请求发送前移除，适用于当前 Anthropic / Gemini Profile。')
+        .insertBefore($(excludeInput).closest('.flex1.flex-container.flexFlowColumn'));
+}
+
 function updatePanelVisibility() {
     const supported = SUPPORTED_SOURCES.has(String($('#chat_completion_source').val()));
     $('#quicker_api').toggle(supported);
+    updateAdditionalParametersButton();
     if (supported) {
         $('#custom_form, #claude_form, #makersuite_form').addClass('quicker-api__native-provider');
     } else {
@@ -2488,6 +2761,7 @@ async function teardownQuickerApi() {
     quickActionObserver?.disconnect();
     quickActionObserver = null;
     closeQuickActionMenu();
+    closeQuickUrlMenu();
     quickActionPlacementPopup = null;
     $('#quicker_api_quick_left, #quicker_api_quick_right, [data-quicker-api-qr-entry]').remove();
     quickPresetWaitCancel?.();
@@ -2550,6 +2824,9 @@ function watchForDomChanges() {
         const elementNodes = mutations.flatMap(mutation => [...mutation.addedNodes, ...mutation.removedNodes])
             .filter(node => node.nodeType === Node.ELEMENT_NODE);
         const apiHubAdded = elementNodes.some(node => node.id === 'apihub_container' || node.querySelector?.('#apihub_container'));
+        if (elementNodes.some(node => node.id === 'custom_exclude_body' || node.querySelector?.('#custom_exclude_body'))) {
+            configureAdditionalParametersPopup();
+        }
         if (apiHubAdded || document.getElementById('apihub_container')) {
             void teardownQuickerApi().then(didTeardown => {
                 if (didTeardown) toastr.warning('检测到 API Hub，Quicker Api 已在安全回滚完成后停用。');

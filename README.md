@@ -43,25 +43,28 @@ Quicker Api 界面直接显示在 SillyTavern 原生的 **API 连接配置** 中
 
 - **多配置管理** — 保存多个 API 配置，快速新增、切换、重命名、复制和删除
 - **支持三种格式** — OpenAI Compatible、Anthropic、Gemini
-- **统一保存** — 一次保存 API 格式、URL、Key、模型和配置名称
+- **统一保存** — 一次保存 API 格式、URL、Key、模型和配置名称；三种格式均可按 Profile 保存排除主体参数
+- **快捷 URL** — 一键填入 SillyTavern 常用服务端点，也可添加和删除自己的 URL 简称
 - **原生密钥管理** — 密钥继续保存在 SillyTavern 的原生 Secrets 中，不写进插件配置
 - **模型列表管理** — 从 API 获取模型，也可以手动添加、编辑、排序和筛选模型
 - **迁移原生配置** — 批量导入 SillyTavern 当前的 OpenAI 配置
 - **预设联动** — 可以让不同的对话补全预设自动使用对应的 API 配置和模型
 - **便捷方案** — 一键组合切换“对话补全预设 + API 配置 + 模型”
+- **保存附加参数** — 配置与附加参数一起保存
 
 > 简单来说，目前支持以下功能：
 - 在自定义兼容格式下实现方便地切换api配置
 - 自定义调整模型的下拉列表展示项！（再也不用在一堆模型里翻自己需要的那几个模型了 ）
 - 自定义切换方案，实现 api、预设、模型的便捷切换！三者可以自由搭配，单切模型、只切预设和模型之类的方案都可以
+- 附加参数可以跟随配置一起切换
 
 ## 支持的 API 格式
 
 | API Format | 对应 SillyTavern 来源 | 说明 |
 |---|---|---|
 | OpenAI Compatible | Custom（兼容 OpenAI） | 支持自定义 URL、Key、模型和附加参数，并保留原生 Custom 推理内容解析 |
-| Anthropic | Claude | 可使用官方 API，也可以绑定 SillyTavern Reverse Proxy Preset |
-| Gemini | Google AI Studio | 可使用官方 API，也可以绑定 SillyTavern Reverse Proxy Preset |
+| Anthropic | Claude | 可使用官方 API或 其它支持 Claude 格式的端点，并支持按 Profile 排除请求顶层参数 |
+| Gemini | Google AI Studio | 可使用官方 API或 其它支持 Gemini 格式的端点，并支持按 Profile 排除请求顶层参数 |
 
 ## 安装
 
@@ -97,12 +100,22 @@ SillyTavern/public/scripts/extensions/third-party/
 2. 将聊天补全来源切换为 **自定义（兼容 OpenAI）** 、Claude 或 Google AI Studio
 3. 点击 Quicker Api 中的 **新增配置** 按钮
 4. 选择 API Format
-5. 填写 URL、Key 和模型
-6. 点击 **保存 API 配置**
+5. 填写 URL、Key 和模型；URL 也可通过右侧的 **快捷 URL** 按钮填入
+6. 点击 Quicker Api 面板中的“附加参数”：OpenAI Compatible 可编辑原生全部三栏；Anthropic/Gemini 只显示并支持“排除主体参数”
+7. 点击 **保存 API 配置**
 
-保存后，这个配置会出现在“当前配置”下拉列表中。
+保存后，这个配置会出现在“当前配置”下拉列表中。OpenAI Compatible 会保存全部三项原生附加参数；Anthropic/Gemini 会保存“排除主体参数”。
 
-### 2. 切换配置
+### 2. 使用快捷 URL
+
+1. 点击 URL 输入框右侧的 **快捷 URL**
+2. 选择 OpenAI、OpenRouter、DeepSeek 等 SillyTavern 常用服务，URL 会立即填入输入框
+3. 点击菜单底部的 **添加快捷 URL**，可保存自己的“简称 + URL”
+4. 自定义项目右侧的删除按钮只会删除该快捷项，不会删除任何 API Profile
+
+快捷 URL 只负责填入地址；仍需点击 **保存 API 配置** 才会把新地址写入当前 Profile。
+
+### 3. 切换配置
 
 直接在“当前配置”下拉列表中选择需要的配置。
 
@@ -112,11 +125,21 @@ SillyTavern/public/scripts/extensions/third-party/
 - URL
 - 密钥或代理密码
 - 模型
-- OpenAI Compatible 附加参数
+- 当前格式支持的附加/排除参数
 
 切换成功后，状态栏会显示“已保存并安全应用”。
 
-### 3. 管理密钥
+“排除主体参数”沿用 SillyTavern 原生 YAML 语法，例如：
+
+```yaml
+- temperature
+- top_p
+- frequency_penalty
+```
+
+发送前，Quicker Api 会确认配置的格式，再删除这些请求顶层字段。
+
+### 4. 管理密钥
 
 Key 输入框支持：
 
@@ -229,7 +252,7 @@ allowKeysExposure: true
 
 - 不要同时启用 Quicker Api 和 API Hub，它们都会管理 API 连接状态
 - 检测到 API Hub 时，Quicker Api 会停止接管连接，避免两个扩展互相覆盖
-- OpenAI Compatible 的附加 Body、Headers 和排除参数只适用于 Custom 来源
+- OpenAI Compatible 支持附加 Body、附加 Headers 和排除参数；Anthropic/Gemini 仅支持排除请求顶层参数
 - 如果状态栏显示“安全阻断”，请重新检查或保存对应配置的密钥
 - 如果看不到便捷入口，请到“便捷按钮管理 → 位置设置”确认没有选择“不使用便捷按钮”
 
