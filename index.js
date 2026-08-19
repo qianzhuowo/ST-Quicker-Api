@@ -290,7 +290,7 @@ function toolbarHtml() {
     return `
         <section id="quicker_api" class="quicker-api">
             <div class="quicker-api__title">
-                <span><i class="fa-solid fa-bolt"></i> 更快更好的酒馆 Api 管理 / Quicker Api</span>
+                <span><i class="fa-solid fa-bolt"></i> Quicker Api</span>
                 <span title="配置保存在 SillyTavern 用户设置中"><i class="fa-solid fa-database"></i></span>
             </div>
             <div class="quicker-api__field">
