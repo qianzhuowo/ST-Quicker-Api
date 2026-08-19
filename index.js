@@ -1017,8 +1017,11 @@ function positionQuickUrlMenu() {
 }
 
 function fillQuickUrl(url) {
-    $('#quicker_api_url').val(url).trigger('input').trigger('focus');
+    const input = $('#quicker_api_url').val(url).trigger('input');
     closeQuickUrlMenu();
+    const mobilePointer = globalThis.matchMedia?.('(max-width: 760px) and (pointer: coarse)').matches;
+    if (mobilePointer) input.trigger('blur');
+    else input.trigger('focus');
 }
 
 async function addCustomQuickUrl() {

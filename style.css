@@ -961,6 +961,28 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     #quicker_api_key_input {
         grid-column: 1 / -1;
         grid-row: 2;
+        background-color: var(--black30a);
+        color: var(--SmartThemeBodyColor);
+        border: 1px solid var(--SmartThemeBorderColor);
+        border-radius: 5px;
+        outline: none;
+        box-shadow: none;
+        font-family: var(--mainFontFamily);
+        font-size: max(16px, var(--mainFontSize));
+        padding: 3px 5px;
+        margin: 5px 0;
+        height: fit-content;
+    }
+
+    #quicker_api_key_input:focus {
+        background-color: var(--black30a);
+        color: var(--SmartThemeBodyColor);
+        border-color: var(--SmartThemeBorderColor);
+        box-shadow: none;
+    }
+
+    #quicker_api_key_input:focus-visible {
+        outline: 1px solid var(--interactable-outline-color-faint);
     }
 
     .quicker-api__key-actions {
