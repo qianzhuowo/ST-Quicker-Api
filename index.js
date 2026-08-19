@@ -320,7 +320,7 @@ function toolbarHtml() {
             <div class="quicker-api__field quicker-api__key-field">
                 <label for="quicker_api_key_input">Key / Password</label>
                 <div class="quicker-api__row quicker-api__key-row">
-                    <input id="quicker_api_key_input" class="text_pole flex1" type="password" autocomplete="off" placeholder="无凭据" />
+                    <input id="quicker_api_key_input" class="text_pole flex1 quicker-api__secret-masked" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="无凭据" />
                     <div class="quicker-api__key-actions">
                         <button id="quicker_api_reveal_key" class="menu_button" type="button" title="显示或隐藏密码" aria-label="显示或隐藏密码"><i class="fa-solid fa-eye-slash"></i></button>
                         <button id="quicker_api_copy_key" class="menu_button" type="button" title="复制密钥" aria-label="复制密钥"><i class="fa-solid fa-copy"></i></button>
@@ -347,7 +347,7 @@ function setStatus(message = '', state = '') {
 }
 
 function clearKeyEditor(placeholder = '未配置密钥') {
-    $('#quicker_api_key_input').val('').attr('type', 'password').attr('placeholder', placeholder);
+    $('#quicker_api_key_input').val('').addClass('quicker-api__secret-masked').attr('placeholder', placeholder);
     $('#quicker_api_reveal_key i').attr('class', 'fa-solid fa-eye-slash');
 }
 
@@ -1518,8 +1518,8 @@ async function revealBoundSecret() {
         if (value === null) return;
         input.val(value);
     }
-    const showing = input.attr('type') === 'text';
-    input.attr('type', showing ? 'password' : 'text');
+    const showing = !input.hasClass('quicker-api__secret-masked');
+    input.toggleClass('quicker-api__secret-masked', showing);
     $('#quicker_api_reveal_key i').attr('class', showing ? 'fa-solid fa-eye-slash' : 'fa-solid fa-eye');
 }
 

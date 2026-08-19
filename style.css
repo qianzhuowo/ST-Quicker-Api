@@ -192,6 +192,10 @@
     min-height: 14rem;
 }
 
+.quicker-api__secret-masked {
+    -webkit-text-security: disc;
+}
+
 .quicker-api__key-actions {
     display: flex;
     align-items: center;
