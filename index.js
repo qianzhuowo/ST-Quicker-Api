@@ -97,6 +97,7 @@ let quickActionPlacementPopup = null;
 let quickActionObserver = null;
 let quickActionRenderPending = false;
 let quickUrlMenu = null;
+let quickUrlPortal = null;
 const nativePresetCaptureHandlers = {};
 const ownedPopups = new Set();
 const activeFetchControllers = new Set();
@@ -293,7 +294,7 @@ function toolbarHtml() {
                 <span><i class="fa-solid fa-bolt"></i> Quicker Api</span>
                 <span title="配置保存在 SillyTavern 用户设置中"><i class="fa-solid fa-database"></i></span>
             </div>
-            <div class="quicker-api__field">
+            <div class="quicker-api__field quicker-api__profile-field">
                 <label for="quicker_api_profile_select">配置</label>
                 <div class="quicker-api__row">
                     <select id="quicker_api_profile_select" class="text_pole" aria-label="API 配置"></select>
@@ -301,7 +302,7 @@ function toolbarHtml() {
                     <button id="quicker_api_save" class="menu_button quicker-api__icon-button quicker-api__save-button" type="button" title="保存 API 设置" aria-label="保存 API 设置"><i class="fa-solid fa-floppy-disk"></i></button>
                     <button id="quicker_api_rename" class="menu_button quicker-api__icon-button" type="button" title="重命名 API 设置" aria-label="重命名 API 设置"><i class="fa-solid fa-pen"></i></button>
                     <button id="quicker_api_copy" class="menu_button quicker-api__icon-button" type="button" title="复制 API 设置" aria-label="复制 API 设置"><i class="fa-solid fa-clone"></i></button>
-                    <button id="quicker_api_import_native" class="menu_button quicker-api__text-button" type="button" title="批量迁移 SillyTavern 的 OpenAI、Reverse Proxy Presets 和 Connection Manager 配置"><i class="fa-solid fa-file-import"></i><span>导入原 OAI 设置</span></button>
+                    <button id="quicker_api_import_native" class="menu_button quicker-api__text-button" type="button" title="批量迁移 SillyTavern 的 OpenAI、Reverse Proxy Presets 和 Connection Manager 配置" aria-label="导入原 OAI 设置"><i class="fa-solid fa-file-import"></i><span class="quicker-api__desktop-label">导入原 OAI 设置</span></button>
                     <button id="quicker_api_delete" class="menu_button quicker-api__icon-button quicker-api__delete-button" type="button" title="删除 API 设置" aria-label="删除 API 设置"><i class="fa-solid fa-trash"></i></button>
                 </div>
             </div>
@@ -313,23 +314,25 @@ function toolbarHtml() {
                 <label for="quicker_api_url">URL</label>
                 <div class="quicker-api__row quicker-api__url-row">
                     <input id="quicker_api_url" class="text_pole" type="url" autocomplete="off" placeholder="Custom 必填；Anthropic / Gemini 留空使用官方端点" />
-                    <button id="quicker_api_quick_url" class="menu_button quicker-api__text-button" type="button" title="从常用端点中快捷填入 URL" aria-haspopup="menu" aria-expanded="false"><i class="fa-solid fa-link"></i><span>快捷 URL</span><i class="fa-solid fa-caret-down"></i></button>
+                    <button id="quicker_api_quick_url" class="menu_button quicker-api__text-button" type="button" title="从常用端点中快捷填入 URL" aria-label="快捷 URL" aria-haspopup="menu" aria-expanded="false"><i class="fa-solid fa-link"></i><span class="quicker-api__desktop-label">快捷 URL</span><i class="fa-solid fa-caret-down quicker-api__desktop-label"></i></button>
                 </div>
             </div>
-            <div class="quicker-api__field">
+            <div class="quicker-api__field quicker-api__key-field">
                 <label for="quicker_api_key_input">Key / Password</label>
-                <div class="quicker-api__row">
-                    <input id="quicker_api_key_input" class="text_pole quicker-api__key-input" type="password" autocomplete="off" placeholder="无凭据" />
-                    <button id="quicker_api_reveal_key" class="menu_button" type="button" title="显示或隐藏密码"><i class="fa-solid fa-eye-slash"></i></button>
-                    <button id="quicker_api_copy_key" class="menu_button" type="button" title="复制密钥"><i class="fa-solid fa-copy"></i></button>
-                    <div id="quicker_api_native_key_manager" class="menu_button fa-solid fa-key fa-fw manage-api-keys" title="Manage API keys" data-i18n="[title]Manage API keys" data-key="api_key_custom"></div>
+                <div class="quicker-api__row quicker-api__key-row">
+                    <input id="quicker_api_key_input" class="text_pole flex1" type="password" autocomplete="off" placeholder="无凭据" />
+                    <div class="quicker-api__key-actions">
+                        <button id="quicker_api_reveal_key" class="menu_button" type="button" title="显示或隐藏密码" aria-label="显示或隐藏密码"><i class="fa-solid fa-eye-slash"></i></button>
+                        <button id="quicker_api_copy_key" class="menu_button" type="button" title="复制密钥" aria-label="复制密钥"><i class="fa-solid fa-copy"></i></button>
+                        <div id="quicker_api_native_key_manager" class="menu_button fa-solid fa-key fa-fw manage-api-keys" title="Manage API keys" aria-label="Manage API keys" data-i18n="[title]Manage API keys" data-key="api_key_custom"></div>
+                    </div>
                 </div>
             </div>
-            <div class="quicker-api__field">
+            <div class="quicker-api__field quicker-api__model-field">
                 <label>模型</label>
                 <div id="quicker_api_model_control" class="quicker-api__row"></div>
             </div>
-            <div class="quicker-api__field">
+            <div class="quicker-api__field quicker-api__parameters-field">
                 <label>参数</label>
                 <div class="quicker-api__row">
                     <button id="quicker_api_additional_parameters" class="menu_button quicker-api__text-button" type="button" title="打开 SillyTavern 原生附加参数编辑器"><i class="fa-solid fa-sliders"></i><span>附加参数</span></button>
@@ -426,7 +429,7 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
         draftSelect.val(modelOverride ?? profile?.model ?? String(oai_settings[FORMATS[format].modelField] || ''));
         root.append(
             draftSelect,
-            $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span>便捷按钮管理</span></button>'),
+            $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
         );
         return;
     }
@@ -438,10 +441,10 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
     select.val(current);
     root.append(
         select,
-        $('<button id="quicker_api_add_model" class="menu_button" type="button" title="添加并使用自定义模型"><i class="fa-solid fa-plus"></i><span>添加</span></button>'),
-        $('<button id="quicker_api_fetch_models" class="menu_button" type="button" title="通过 SillyTavern status 后端获取模型"><i class="fa-solid fa-arrows-rotate"></i><span>获取模型</span></button>'),
-        $('<button id="quicker_api_manage_models" class="menu_button" type="button" title="管理自定义与远端模型列表"><i class="fa-solid fa-list-check"></i><span>管理模型列表</span></button>'),
-        $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span>便捷按钮管理</span></button>'),
+        $('<button id="quicker_api_add_model" class="menu_button" type="button" title="添加并使用自定义模型" aria-label="添加并使用自定义模型"><i class="fa-solid fa-plus"></i><span class="quicker-api__desktop-label">添加</span></button>'),
+        $('<button id="quicker_api_fetch_models" class="menu_button" type="button" title="通过 SillyTavern status 后端获取模型"><i class="fa-solid fa-arrows-rotate"></i><span class="quicker-api__desktop-label">获取模型</span><span class="quicker-api__mobile-label">获取</span></button>'),
+        $('<button id="quicker_api_manage_models" class="menu_button" type="button" title="管理自定义与远端模型列表"><i class="fa-solid fa-list-check"></i><span class="quicker-api__desktop-label">管理模型列表</span><span class="quicker-api__mobile-label">管理模型</span></button>'),
+        $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
     );
 }
 
@@ -987,7 +990,8 @@ function isValidQuickUrl(value) {
 }
 
 function closeQuickUrlMenu() {
-    quickUrlMenu?.remove();
+    quickUrlPortal?.remove();
+    quickUrlPortal = null;
     quickUrlMenu = null;
     $('#quicker_api_quick_url').attr('aria-expanded', 'false');
     $(document).off('.quickerApiQuickUrl');
@@ -1078,11 +1082,12 @@ function openQuickUrlMenu() {
     menu.append($('<button class="quicker-api__quick-url-add" type="button" role="menuitem">')
         .append('<i class="fa-solid fa-plus"></i>', $('<span>').text('添加快捷 URL'))
         .on('click', () => void addCustomQuickUrl()));
-    menu.on('pointerdown mousedown click', event => {
+    menu.on('touchstart touchend pointerdown pointerup mousedown mouseup click', event => {
         event.stopPropagation();
         if (event.type === 'mousedown') event.preventDefault();
     });
-    quickUrlMenu = menu.appendTo(document.body);
+    quickUrlPortal = $('<div class="quicker-api__quick-url-portal openDrawer pinnedOpen">').appendTo(document.body);
+    quickUrlMenu = menu.appendTo(quickUrlPortal);
     $('#quicker_api_quick_url').attr('aria-expanded', 'true');
     positionQuickUrlMenu();
     $(document)

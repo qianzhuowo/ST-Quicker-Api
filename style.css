@@ -39,6 +39,10 @@
     flex-wrap: wrap;
 }
 
+.quicker-api__mobile-label {
+    display: none !important;
+}
+
 .quicker-api__row > .text_pole,
 .quicker-api__row > select,
 #quicker_api_profile_select,
@@ -54,6 +58,10 @@
 
 .quicker-api__url-row > #quicker_api_url {
     min-width: 0;
+}
+
+.quicker-api__quick-url-portal {
+    display: contents !important;
 }
 
 .quicker-api__quick-url-menu {
@@ -184,9 +192,10 @@
     min-height: 14rem;
 }
 
-.quicker-api__key-input {
-    min-width: 14rem;
-    flex: 1 1 18rem;
+.quicker-api__key-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
 }
 
 .quicker-api .menu_button,
@@ -915,12 +924,108 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
 }
 
 @media (max-width: 560px) {
+    .quicker-api {
+        padding: 0.55rem;
+    }
+
+    .quicker-api__field {
+        grid-template-columns: minmax(3.2rem, auto) minmax(0, 1fr);
+        gap: 0.35rem;
+    }
+
+    .quicker-api__desktop-label {
+        display: none !important;
+    }
+
+    .quicker-api__mobile-label {
+        display: inline-flex !important;
+    }
+
     .quicker-api__url-row {
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
     }
 
     .quicker-api__url-row > #quicker_api_quick_url {
+        flex: 0 0 auto;
+    }
+
+    .quicker-api__key-field {
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+    }
+
+    .quicker-api__key-row {
+        display: contents;
+    }
+
+    #quicker_api_key_input {
+        grid-column: 1 / -1;
+        grid-row: 2;
+    }
+
+    .quicker-api__key-actions {
+        grid-column: 2;
+        grid-row: 1;
+        gap: 0.25rem;
+    }
+
+    .quicker-api__key-actions .menu_button {
+        width: 2.1rem;
+        min-width: 2.1rem;
+        min-height: 2.1rem;
+        padding: 0;
+    }
+
+    #quicker_api_profile_select,
+    #quicker_api_model_control > .text_pole,
+    #quicker_api_model_control > select {
         flex: 1 1 100%;
+        max-width: 100%;
+    }
+
+    #quicker_api_profile_select + .menu_button,
+    #quicker_api_profile_select ~ .quicker-api__icon-button {
+        width: 2rem;
+        min-width: 2rem;
+        min-height: 2rem;
+    }
+
+    #quicker_api_import_native,
+    #quicker_api_quick_url {
+        width: 2.2rem;
+        min-width: 2.2rem;
+        min-height: 2.2rem;
+        padding-inline: 0;
+    }
+
+    .quicker-api__profile-field,
+    .quicker-api__model-field {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .quicker-api__profile-field > label,
+    .quicker-api__profile-field > .quicker-api__row,
+    .quicker-api__model-field > label,
+    .quicker-api__model-field > #quicker_api_model_control {
+        grid-column: 1;
+    }
+
+    #quicker_api_model_control {
+        gap: 0.3rem;
+    }
+
+    #quicker_api_add_model {
+        width: 2.2rem;
+        min-width: 2.2rem;
+        padding-inline: 0;
+    }
+
+    .quicker-api__parameters-field {
+        grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .quicker-api__parameters-field .quicker-api__row {
+        flex-wrap: nowrap;
     }
 
     .quicker-api__quick-url-select {
