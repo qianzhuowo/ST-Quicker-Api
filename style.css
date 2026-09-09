@@ -22,6 +22,59 @@
     font-weight: 600;
 }
 
+.quicker-api__toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 2rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.quicker-api__toggle:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor);
+    outline-offset: 3px;
+}
+
+.quicker-api__brand,
+.quicker-api__summary {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__summary,
+.quicker-api.is-collapsed .quicker-api__brand,
+#quicker_api_body[hidden] {
+    display: none !important;
+}
+
+.quicker-api.is-collapsed .quicker-api__summary {
+    display: block !important;
+}
+
+.quicker-api.is-collapsed .quicker-api__title {
+    margin-bottom: 0;
+}
+
+.quicker-api.is-collapsed .quicker-api__chevron {
+    transform: rotate(180deg);
+}
+
+.quicker-api__chevron {
+    flex: 0 0 auto;
+}
+
 .quicker-api__field {
     display: grid;
     grid-template-columns: minmax(5.5rem, 7.5rem) minmax(0, 1fr);
@@ -630,14 +683,27 @@ dialog.popup:has(.quicker-api__model-manager) .popup-controls .menu_button:focus
 
 dialog.popup:has(.quicker-api__quick-manager) {
     width: min(96dvw, 82rem);
-    height: auto !important;
-    max-height: calc(100dvh - 2rem);
+    height: min(82dvh, 46rem) !important;
+    min-height: 0;
+    max-height: calc(100dvh - 1rem);
+    padding: 0.6rem;
+    box-sizing: border-box;
+}
+
+dialog.popup:has(.quicker-api__quick-manager) .popup-body,
+dialog.popup:has(.quicker-api__quick-manager) .popup-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    max-height: none;
 }
 
 dialog.popup:has(.quicker-api__quick-manager) .popup-content {
     margin-top: 0;
-    padding: 0 4px;
-    flex: 0 1 auto;
+    padding: 0;
+    overflow: hidden;
 }
 
 .quicker-api__quick-manager {
@@ -646,6 +712,8 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-content {
     max-width: 100%;
     min-width: 0;
     flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
     gap: 0.7rem;
     color: var(--SmartThemeBodyColor);
     text-align: left;
@@ -667,6 +735,8 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
 
 .quicker-api__quick-header {
     min-width: 0;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
     justify-content: space-between;
     padding-bottom: 0.6rem;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
@@ -681,6 +751,17 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
     font-weight: 700;
 }
 
+.quicker-api__quick-header-actions {
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    max-width: 100%;
+}
+
+.quicker-api__quick-header-actions > .menu_button {
+    flex-shrink: 0;
+    margin: 0;
+}
+
 .quicker-api__quick-title > span {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -692,7 +773,12 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
 .quicker-api__quick-editor-actions .menu_button,
 .quicker-api__placement-popup .menu_button {
     display: inline-flex;
+    width: auto;
+    min-width: 2.2rem;
     min-height: 2.2rem;
+    flex-shrink: 0;
+    white-space: nowrap;
+    margin: 0;
     align-items: center;
     justify-content: center;
     gap: 0.35rem;
@@ -711,8 +797,9 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
     display: grid;
     min-width: 0;
     min-height: 0;
-    height: min(62dvh, 34rem);
-    grid-template-columns: minmax(15rem, 0.9fr) minmax(0, 1.1fr);
+    flex: 1 1 auto;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    grid-template-rows: minmax(0, 1fr);
     gap: 0.75rem;
     overflow: hidden;
 }
@@ -798,13 +885,13 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
 
 .quicker-api__quick-editor {
     display: flex;
-    overflow-x: hidden;
-    overflow-y: auto;
+    overflow: hidden;
     flex-direction: column;
     gap: 0.6rem;
 }
 
 .quicker-api__quick-editor-title {
+    flex: 0 0 auto;
     margin: 0;
     padding-bottom: 0.45rem;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
@@ -813,12 +900,18 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
 .quicker-api__quick-editor-fields {
     display: flex;
     min-width: 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     flex: 1 1 auto;
     flex-direction: column;
     gap: 0.6rem;
 }
 
 .quicker-api__quick-editor-actions {
+    flex: 0 0 auto;
+    flex-wrap: wrap;
     justify-content: flex-end;
     margin-top: auto;
     padding-top: 0.65rem;
@@ -1069,34 +1162,43 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
         overflow-x: hidden;
     }
 
-    .quicker-api__quick-header {
-        align-items: flex-start;
-    }
-
     .quicker-api__quick-header-actions {
-        flex: 0 0 auto;
+        width: 100%;
     }
 
-    .quicker-api__quick-header-actions span {
-        display: none;
+    .quicker-api__quick-header-actions > :first-child {
+        margin-right: auto;
     }
 
     .quicker-api__quick-columns {
-        height: auto;
-        max-height: calc(100dvh - 8rem);
-        grid-template-columns: minmax(0, 1fr);
+        display: flex;
+        flex-direction: column;
         overflow-x: hidden;
         overflow-y: auto;
+        overscroll-behavior: contain;
     }
 
     .quicker-api__quick-list {
-        height: min(36dvh, 20rem);
-        max-height: 36dvh;
+        height: clamp(7rem, 24dvh, 16rem);
         flex: 0 0 auto;
     }
 
     .quicker-api__quick-editor {
-        overflow-x: hidden;
+        height: auto;
+        flex: 0 0 auto;
+        overflow: visible;
+    }
+
+    .quicker-api__quick-editor-fields {
+        flex: 0 0 auto;
+        overflow: visible;
+    }
+
+    .quicker-api__quick-editor-actions {
+        position: sticky;
+        bottom: 0;
+        padding-bottom: 0.25rem;
+        background: var(--SmartThemeBlurTintColor);
     }
 
     .quicker-api__quick-field {

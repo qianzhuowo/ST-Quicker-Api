@@ -1,0 +1,2 @@
+# Local regression tests; keep them out of the published extension.
+/tests/

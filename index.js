@@ -1,13 +1,15 @@
 import { extension_settings } from '../../../extensions.js';
-import { chat_completion_sources, oai_settings, proxies } from '../../../openai.js';
+import { chat_completion_sources, oai_settings, openai_settings, openai_setting_names, proxies } from '../../../openai.js';
 import { SECRET_KEYS, secret_state } from '../../../secrets.js';
 import { Popup, POPUP_TYPE } from '../../../popup.js';
-import { eventSource, event_types, getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
+import { cancelDebounce } from '../../../utils.js';
+import { eventSource, event_types, getRequestHeaders, saveSettings, saveSettingsDebounced } from '../../../../script.js';
 import { yaml } from '../../../../lib.js';
 
 const MODULE_NAME = 'quickerApi';
 const LEGACY_MODULE_NAME = 'customOpenAIProfiles';
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
+const PANEL_COLLAPSED_STORAGE_KEY = 'quickerApi.panelCollapsed';
 const EMPTY_SECRET_LABEL = 'Quicker Api · No key';
 const BUILTIN_QUICK_URLS = Object.freeze([
     { name: 'OpenAI', url: 'https://api.openai.com/v1' },
@@ -69,6 +71,7 @@ const DEFAULT_SETTINGS = {
     activeProfileId: null,
     emptySecretIds: {},
     presetBindings: {},
+    presetModels: {},
     migratedFromCustomOpenAIProfiles: false,
     blockedSecretKeys: {},
     quickActions: [],
@@ -77,6 +80,22 @@ const DEFAULT_SETTINGS = {
 };
 
 let operationQueue = Promise.resolve();
+let pendingOperations = 0;
+let syncingEditorModel = false;
+let keyEditorDirty = false;
+let nativeCreateMonitor = null;
+let nativeIntentExpiry = null;
+let presetSaveSequence = 0;
+const latestPresetSaves = new Map();
+let confirmedSettingsSnapshot = '';
+let settingsSaveState = 'saved';
+let settingsSaveTimer = null;
+const settingsSaveWaiters = new Set();
+let panelCollapsed = readBrowserPanelState();
+let panelSummaryText = '';
+let panelStateDirty = false;
+let panelStateSaveHandle = null;
+let panelStateSaveUsesIdle = false;
 let profileSelectionGeneration = 0;
 let extensionDisabled = false;
 let teardownPending = false;
@@ -109,6 +128,57 @@ function settings() {
 
 function profiles() {
     return settings().profiles;
+}
+
+function finishSettingsSave(snapshot, success) {
+    if (extensionDisabled || teardownPending || !snapshot) return;
+    if (success) confirmedSettingsSnapshot = snapshot;
+    if (snapshot === JSON.stringify(settings())) {
+        clearTimeout(settingsSaveTimer);
+        const previous = settingsSaveState;
+        settingsSaveState = success ? 'saved' : 'error';
+        if (!success && previous !== 'error') toastr.warning('Quicker Api 设置尚未确认保存到服务器，请检查连接并重试保存；请勿直接刷新，以免丢失未保存的修改。');
+    }
+    for (const waiter of [...settingsSaveWaiters]) {
+        if (waiter.snapshot === snapshot) waiter.complete(success);
+    }
+}
+
+function scheduleSettingsSave() {
+    if (extensionDisabled || teardownPending) return;
+    const snapshot = JSON.stringify(settings());
+    settingsSaveState = snapshot === confirmedSettingsSnapshot ? 'saved' : 'pending';
+    clearTimeout(settingsSaveTimer);
+    if (settingsSaveState === 'pending') {
+        settingsSaveTimer = setTimeout(() => finishSettingsSave(snapshot, false), 15000);
+    }
+    saveSettingsDebounced();
+}
+
+async function persistSettingsNow() {
+    if (extensionDisabled || teardownPending) return false;
+    scheduleSettingsSave();
+    cancelDebounce(saveSettingsDebounced);
+    const snapshot = JSON.stringify(settings());
+    // saveSettings catches its own errors and returns no result. Verify the
+    // exact plugin snapshot through the original settings POST response instead.
+    return await new Promise(resolve => {
+        const waiter = { snapshot, complete: null };
+        const timer = setTimeout(() => { finishSettingsSave(snapshot, false); waiter.complete(false); }, 15000);
+        waiter.complete = success => {
+            clearTimeout(timer);
+            settingsSaveWaiters.delete(waiter);
+            resolve(success);
+        };
+        settingsSaveWaiters.add(waiter);
+        void saveSettings().catch(() => finishSettingsSave(snapshot, false));
+    });
+}
+
+function warnBeforeLeaving(event) {
+    if (extensionDisabled || settingsSaveState === 'saved') return;
+    event.preventDefault();
+    event.returnValue = '';
 }
 
 function normalizeText(value) {
@@ -153,6 +223,25 @@ function selectedProfile() {
 
 function currentPresetName() {
     return normalizeText(oai_settings.preset_settings_openai || $('#settings_preset_openai option:selected').text());
+}
+
+function nativePresetByName(name) {
+    return Object.hasOwn(openai_setting_names, name) ? openai_settings[openai_setting_names[name]] : null;
+}
+
+function presetModelSnapshot(profile, model) {
+    return { profileId: profile.id, format: profile.format, model: normalizeText(model).slice(0, 500) };
+}
+
+function boundPresetModel(name, profile) {
+    const snapshot = settings().presetModels[name];
+    if (snapshot?.profileId === profile.id && snapshot.format === profile.format) return snapshot.model;
+    const preset = nativePresetByName(name);
+    const config = FORMATS[profile.format];
+    if (preset?.chat_completion_source === config.source && typeof preset[config.modelField] === 'string') {
+        return normalizeText(preset[config.modelField]);
+    }
+    return profile.model;
 }
 
 function uniqueName(baseName, ignoredId = null) {
@@ -216,6 +305,10 @@ function normalizeProfile(raw) {
 }
 
 function initializeSettings() {
+    // SillyTavern loads extension_settings from the user's settings.json before
+    // activating extension scripts, including extensions installed at runtime.
+    const originalSnapshot = JSON.stringify(extension_settings[MODULE_NAME]);
+    confirmedSettingsSnapshot = originalSnapshot || '';
     let changed = false;
     if (!extension_settings[MODULE_NAME] || typeof extension_settings[MODULE_NAME] !== 'object') {
         extension_settings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
@@ -247,7 +340,14 @@ function initializeSettings() {
 
     value.profiles = Array.isArray(value.profiles) ? value.profiles.map(profile => normalizeProfile(profile)) : [];
     value.emptySecretIds = value.emptySecretIds && typeof value.emptySecretIds === 'object' ? value.emptySecretIds : {};
-    value.presetBindings = value.presetBindings && typeof value.presetBindings === 'object' ? value.presetBindings : {};
+    value.presetBindings = Object.assign(Object.create(null), value.presetBindings && typeof value.presetBindings === 'object' && !Array.isArray(value.presetBindings) ? value.presetBindings : {});
+    value.presetModels = Object.assign(Object.create(null), value.presetModels && typeof value.presetModels === 'object' && !Array.isArray(value.presetModels) ? value.presetModels : {});
+    // This is a browser UI preference, not part of the shared API settings.
+    // Remove the old server field once; never copy it into a new browser.
+    if (Object.hasOwn(value, 'panelCollapsed')) {
+        delete value.panelCollapsed;
+        changed = true;
+    }
     value.blockedSecretKeys = value.blockedSecretKeys && typeof value.blockedSecretKeys === 'object' ? value.blockedSecretKeys : {};
     value.quickActionPlacement = ['leftSendForm', 'rightSendForm', 'qrButtons', 'disabled'].includes(value.quickActionPlacement)
         ? value.quickActionPlacement
@@ -281,8 +381,29 @@ function initializeSettings() {
             changed = true;
         }
     }
+    for (const [name, snapshot] of Object.entries(value.presetModels)) {
+        const profile = value.profiles.find(item => item.id === value.presetBindings[name]);
+        if (!profile || snapshot?.profileId !== profile.id || snapshot?.format !== profile.format || typeof snapshot.model !== 'string') {
+            delete value.presetModels[name];
+            changed = true;
+        } else {
+            value.presetModels[name] = presetModelSnapshot(profile, snapshot.model);
+        }
+    }
+    // Older bindings contain only a Profile ID. Recover each model from its
+    // own native preset, never copy one Profile default into every binding.
+    for (const [name, profileId] of Object.entries(value.presetBindings)) {
+        if (Object.hasOwn(value.presetModels, name)) continue;
+        const profile = value.profiles.find(item => item.id === profileId);
+        const preset = nativePresetByName(name);
+        const config = FORMATS[profile.format];
+        if (preset?.chat_completion_source === config.source && typeof preset[config.modelField] === 'string') {
+            value.presetModels[name] = presetModelSnapshot(profile, preset[config.modelField]);
+            changed = true;
+        }
+    }
     if (storedVersion !== SCHEMA_VERSION) changed = true;
-    if (changed) saveSettingsDebounced();
+    if (changed || originalSnapshot !== JSON.stringify(value)) scheduleSettingsSave();
     return true;
 }
 
@@ -291,9 +412,13 @@ function toolbarHtml() {
     return `
         <section id="quicker_api" class="quicker-api">
             <div class="quicker-api__title">
-                <span><i class="fa-solid fa-bolt"></i> Quicker Api</span>
-                <span title="配置保存在 SillyTavern 用户设置中"><i class="fa-solid fa-database"></i></span>
+                <button id="quicker_api_toggle" class="quicker-api__toggle" type="button" aria-expanded="true" aria-controls="quicker_api_body" title="收起 Quicker Api">
+                    <span class="quicker-api__brand"><i class="fa-solid fa-bolt"></i> Quicker Api</span>
+                    <span id="quicker_api_summary" class="quicker-api__summary"></span>
+                    <i class="fa-solid fa-chevron-up quicker-api__chevron" aria-hidden="true"></i>
+                </button>
             </div>
+            <div id="quicker_api_body">
             <div class="quicker-api__field quicker-api__profile-field">
                 <label for="quicker_api_profile_select">配置</label>
                 <div class="quicker-api__row">
@@ -339,7 +464,78 @@ function toolbarHtml() {
                 </div>
             </div>
             <div id="quicker_api_status" class="quicker-api__status"></div>
+            </div>
         </section>`;
+}
+
+function readBrowserPanelState() {
+    try {
+        return globalThis.localStorage.getItem(PANEL_COLLAPSED_STORAGE_KEY) === 'true';
+    } catch {
+        // Storage may be blocked in private/embedded browsers. Keep a page-only
+        // preference in that case, without falling back to server settings.
+        return false;
+    }
+}
+
+function flushPanelState() {
+    if (panelStateSaveHandle !== null) {
+        if (panelStateSaveUsesIdle) globalThis.cancelIdleCallback?.(panelStateSaveHandle);
+        else clearTimeout(panelStateSaveHandle);
+        panelStateSaveHandle = null;
+    }
+    if (!panelStateDirty) return;
+    panelStateDirty = false;
+    try {
+        globalThis.localStorage.setItem(PANEL_COLLAPSED_STORAGE_KEY, String(panelCollapsed));
+    } catch {
+        // Folding must still work even if the browser refuses persistence.
+    }
+}
+
+function schedulePanelStateSave() {
+    panelStateDirty = true;
+    if (panelStateSaveHandle !== null) return;
+    // Coalesce rapid toggles and keep synchronous localStorage work off the
+    // click path. pagehide/teardown flush the final value if we leave sooner.
+    panelStateSaveUsesIdle = typeof globalThis.requestIdleCallback === 'function';
+    panelStateSaveHandle = panelStateSaveUsesIdle
+        ? globalThis.requestIdleCallback(flushPanelState, { timeout: 500 })
+        : setTimeout(flushPanelState, 100);
+}
+
+function setAttributeIfChanged(element, name, value) {
+    if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
+function renderPanelCollapseState() {
+    const panel = document.getElementById('quicker_api');
+    const body = document.getElementById('quicker_api_body');
+    const toggle = document.getElementById('quicker_api_toggle');
+    if (!panel || !body || !toggle) return;
+    if (panel.classList.contains('is-collapsed') !== panelCollapsed) panel.classList.toggle('is-collapsed', panelCollapsed);
+    if (body.hidden !== panelCollapsed) body.hidden = panelCollapsed;
+    setAttributeIfChanged(toggle, 'aria-expanded', String(!panelCollapsed));
+    setAttributeIfChanged(toggle, 'aria-label', `${panelCollapsed ? '展开' : '收起'} Quicker Api：${panelSummaryText}`);
+    setAttributeIfChanged(toggle, 'title', panelCollapsed ? panelSummaryText : '收起 Quicker Api');
+}
+
+function renderPanelSummary() {
+    const summary = document.getElementById('quicker_api_summary');
+    if (!summary) return;
+    const format = normalizeFormat($('#quicker_api_format').val());
+    panelSummaryText = `${FORMATS[format].label} · ${selectedProfile()?.name || '未选择配置'} · ${getEditorModel(format) || '未选择模型'}`;
+    if (summary.textContent !== panelSummaryText) summary.textContent = panelSummaryText;
+    setAttributeIfChanged(summary, 'title', panelSummaryText);
+    renderPanelCollapseState();
+}
+
+function togglePanel() {
+    if (extensionDisabled || teardownPending) return;
+    panelCollapsed = !panelCollapsed;
+    if (panelCollapsed && quickUrlMenu) closeQuickUrlMenu();
+    renderPanelCollapseState();
+    schedulePanelStateSave();
 }
 
 function setStatus(message = '', state = '') {
@@ -347,6 +543,7 @@ function setStatus(message = '', state = '') {
 }
 
 function clearKeyEditor(placeholder = '未配置密钥') {
+    keyEditorDirty = false;
     $('#quicker_api_key_input').val('').addClass('quicker-api__secret-masked').attr('placeholder', placeholder);
     $('#quicker_api_reveal_key i').attr('class', 'fa-solid fa-eye-slash');
 }
@@ -383,8 +580,26 @@ function syncEditorModelToNative() {
     const format = normalizeFormat($('#quicker_api_format').val());
     const config = FORMATS[format];
     const model = getEditorModel(format);
-    oai_settings[config.modelField] = model;
-    $(config.modelInput).val(model).trigger(format === 'openai' ? 'input' : 'change');
+    syncingEditorModel = true;
+    try {
+        oai_settings[config.modelField] = model;
+        const input = $(config.modelInput);
+        if (input.is('select') && !input.find('option').filter((_, option) => option.value === model).length) {
+            input.append($('<option>').val(model).text(model));
+        }
+        input.val(model).trigger(format === 'openai' ? 'input' : 'change');
+    } finally {
+        syncingEditorModel = false;
+    }
+}
+
+function handleNativeModelChange() {
+    if (syncingEditorModel || extensionDisabled || teardownPending || presetTransitionBlocked || pendingOperations) return;
+    const format = normalizeFormat($('#quicker_api_format').val());
+    if (oai_settings.chat_completion_source !== FORMATS[format].source) return;
+    // Keep the panel aligned with changes made by native controls/other extensions.
+    renderModelControl(selectedProfile(), String(oai_settings[FORMATS[format].modelField] || ''));
+    renderStatus();
 }
 
 function syncEditorConnectionToNative() {
@@ -426,11 +641,16 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
         const nativeSelect = $(FORMATS[format].modelInput);
         const draftSelect = $('<select id="quicker_api_provider_model" class="text_pole flex1" aria-label="Provider 模型">');
         nativeSelect.find('option').each((_, option) => draftSelect.append($(option).clone()));
-        draftSelect.val(modelOverride ?? profile?.model ?? String(oai_settings[FORMATS[format].modelField] || ''));
+        const providerModel = normalizeText(modelOverride ?? profile?.model ?? oai_settings[FORMATS[format].modelField]);
+        if (!draftSelect.find('option').filter((_, option) => option.value === providerModel).length) {
+            draftSelect.append($('<option>').val(providerModel).text(providerModel || '— 选择模型 —'));
+        }
+        draftSelect.val(providerModel);
         root.append(
             draftSelect,
             $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
         );
+        renderPanelSummary();
         return;
     }
     const current = normalizeText(modelOverride ?? profile?.model ?? oai_settings.custom_model);
@@ -446,13 +666,14 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
         $('<button id="quicker_api_manage_models" class="menu_button" type="button" title="管理自定义与远端模型列表"><i class="fa-solid fa-list-check"></i><span class="quicker-api__desktop-label">管理模型列表</span><span class="quicker-api__mobile-label">管理模型</span></button>'),
         $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
     );
+    renderPanelSummary();
 }
 
-function renderProfileEditor(profile = selectedProfile()) {
+function renderProfileEditor(profile = selectedProfile(), modelOverride = null) {
     const format = profile?.format || normalizeFormat($('#quicker_api_format').val());
     $('#quicker_api_format').val(format);
     $('#quicker_api_url').val(profile?.endpoint ?? String(oai_settings[FORMATS[format].endpointField] || ''));
-    renderModelControl(profile);
+    renderModelControl(profile, modelOverride);
     editorModelBaseline = getEditorModel(format);
 }
 
@@ -465,7 +686,10 @@ function renderProfiles(preferredId = null) {
     select.val(profiles().some(profile => profile.id === selectedId) ? selectedId : '');
     const profile = selectedProfile();
     if (profile) $('#quicker_api_format').val(profile.format);
-    renderProfileEditor(profile);
+    const activeModel = profile && settings().activeProfileId === profile.id
+        && oai_settings.chat_completion_source === FORMATS[profile.format].source
+        ? String(oai_settings[FORMATS[profile.format].modelField] || '') : null;
+    renderProfileEditor(profile, activeModel);
     updateCredentialEditor(profile);
     renderStatus();
 }
@@ -499,10 +723,11 @@ function editorHasUnsavedChanges(profile) {
         || additional.excludeBody !== profile.excludeBody
         || (profile.format === 'openai' && (additional.includeBody !== profile.includeBody
             || additional.includeHeaders !== profile.includeHeaders))
-        || Boolean(normalizeText($('#quicker_api_key_input').val()));
+        || (keyEditorDirty && Boolean(normalizeText($('#quicker_api_key_input').val())));
 }
 
 function renderStatus(extraMessage = '') {
+    renderPanelSummary();
     const profile = selectedProfile();
     const presetName = currentPresetName();
     if (profile) {
@@ -521,20 +746,20 @@ function renderStatus(extraMessage = '') {
 }
 
 function setOperationControlsDisabled(disabled) {
-    $('#quicker_api select, #quicker_api button').prop('disabled', disabled);
+    $('#quicker_api select, #quicker_api button:not(#quicker_api_toggle)').prop('disabled', disabled);
 }
 
 function setCredentialSafetyBlock(secretKey, message) {
     settings().blockedSecretKeys[secretKey] = message || `${secretKey} 密钥状态无法确认；使用该官方来源时生成请求将被阻断。`;
     settings().activeProfileId = null;
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderProfiles(settings().selectedProfileId);
 }
 
 function clearCredentialSafetyBlock(secretKey) {
     if (!settings().blockedSecretKeys[secretKey]) return;
     delete settings().blockedSecretKeys[secretKey];
-    saveSettingsDebounced();
+    scheduleSettingsSave();
 }
 
 function beginPresetTransition() {
@@ -597,6 +822,7 @@ function guardGenerationWhenBlocked(generateData) {
 }
 
 function enqueueOperation(operation) {
+    pendingOperations++;
     const run = async () => {
         if (extensionDisabled || teardownPending) return;
         const presetWasDisabled = Boolean($('#settings_preset_openai').prop('disabled'));
@@ -613,7 +839,7 @@ function enqueueOperation(operation) {
             $('#settings_preset_openai').prop('disabled', presetWasDisabled);
         }
     };
-    operationQueue = operationQueue.then(run, run);
+    operationQueue = operationQueue.then(run, run).finally(() => { pendingOperations--; });
     return operationQueue;
 }
 
@@ -681,7 +907,7 @@ async function ensureEmptySecret(key) {
     const state = id ? await readAuthoritativeSecretState() : null;
     if (id && state?.[key]?.some(entry => entry.id === id && entry.active)) {
         settings().emptySecretIds[key] = id;
-        saveSettingsDebounced();
+        scheduleSettingsSave();
         return id;
     }
     return '';
@@ -741,7 +967,7 @@ async function enterFailClosedState(message, affectedSecretKey = SECRET_KEYS.CUS
     } else {
         settings().blockedSecretKeys[affectedSecretKey] = `${message} ${affectedSecretKey} 密钥槽状态无法确认，生成已阻断。`;
     }
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderProfiles();
     toastr.error(`${message} ${safeId ? '受影响密钥槽已切换至安全空密钥。' : '无法确认安全空密钥，使用该槽的生成已阻断。'}`);
 }
@@ -846,7 +1072,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
             if (extensionDisabled) throw new Error('Extension disabled while applying proxy profile');
             settings().activeProfileId = profile.id;
             if (!keepPresetTransition) endPresetTransition();
-            saveSettingsDebounced();
+            scheduleSettingsSave();
             renderProfiles(profile.id);
             if (!applyModel) {
                 renderModelControl(profile, String(oai_settings[config.modelField] || ''));
@@ -857,7 +1083,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
             console.error('[QuickerApi] Proxy field application failed:', error);
             restoreNative(nativeSnapshot);
             settings().activeProfileId = previousSelection;
-            saveSettingsDebounced();
+            scheduleSettingsSave();
             renderProfiles(settings().selectedProfileId);
             return false;
         }
@@ -912,7 +1138,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
         clearCredentialSafetyBlock(config.secretKey);
         settings().activeProfileId = profile.id;
         if (!keepPresetTransition) endPresetTransition();
-        saveSettingsDebounced();
+        scheduleSettingsSave();
         renderProfiles(profile.id);
         if (!applyModel) {
             renderModelControl(profile, String(oai_settings[config.modelField] || ''));
@@ -1049,7 +1275,7 @@ async function addCustomQuickUrl() {
         return toastr.warning('已存在同名的自定义快捷 URL。');
     }
     settings().quickUrls.push(normalizeQuickUrl({ id: makeId('quick-url'), name, url }));
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     toastr.success(`已添加快捷 URL：${name}`);
 }
 
@@ -1066,7 +1292,7 @@ function quickUrlItem(item, custom = false) {
             .on('click', event => {
                 event.stopPropagation();
                 settings().quickUrls = settings().quickUrls.filter(candidate => candidate.id !== item.id);
-                saveSettingsDebounced();
+                scheduleSettingsSave();
                 openQuickUrlMenu();
             }));
     }
@@ -1115,7 +1341,7 @@ function toggleQuickUrlMenu() {
 function createProfile() {
     clearKeyEditor();
     settings().selectedProfileId = null;
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     const select = $('#quicker_api_profile_select');
     select.find('option[value=""]').text('— 新建 API 配置（未保存） —');
     select.val('');
@@ -1326,7 +1552,7 @@ async function importNativeProfile() {
             if (!await rotateSecretVerified(key, id)) await enterFailClosedState('迁移后无法恢复原活动凭据。', key);
         }
     }
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderProfiles(settings().selectedProfileId);
     if (imported) toastr.success(`已迁移 ${imported} 个原生连接配置。`);
     if (pending) toastr.warning(`${pending} 个配置需要重新配置凭据。`);
@@ -1353,7 +1579,7 @@ async function saveSelectedProfile() {
         toastr.error('无法读取权威密钥状态，已取消保存 API 配置。');
         return;
     }
-    const keyValue = normalizeText($('#quicker_api_key_input').val());
+    const keyValue = keyEditorDirty ? normalizeText($('#quicker_api_key_input').val()) : '';
     let captureBase = current;
     if (keyValue) {
         const credentialDraft = normalizeProfile({ ...structuredClone(current), format });
@@ -1375,10 +1601,13 @@ async function saveSelectedProfile() {
     settings().selectedProfileId = current.id;
     settings().activeProfileId = current.id;
     const presetName = currentPresetName();
-    if (presetName) settings().presetBindings[presetName] = current.id;
-    saveSettingsDebounced();
+    if (presetName) {
+        settings().presetBindings[presetName] = current.id;
+        settings().presetModels[presetName] = presetModelSnapshot(current, current.model);
+    }
+    scheduleSettingsSave();
     renderProfiles(current.id);
-    toastr.success('API 配置已保存。');
+    if (await persistSettingsNow()) toastr.success('API 配置已保存到 SillyTavern。');
 }
 
 async function renameSelectedProfile() {
@@ -1388,7 +1617,7 @@ async function renameSelectedProfile() {
     if (!name) return;
     profile.name = uniqueName(name, profile.id);
     profile.updatedAt = new Date().toISOString();
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderProfiles(profile.id);
 }
 
@@ -1400,7 +1629,7 @@ async function copySelectedProfile() {
     const copy = normalizeProfile({ ...structuredClone(profile), id: makeId(), name: uniqueName(name), updatedAt: new Date().toISOString() });
     profiles().push(copy);
     settings().selectedProfileId = copy.id;
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderProfiles(copy.id);
     toastr.success('配置已复制。');
 }
@@ -1412,11 +1641,14 @@ async function deleteSelectedProfile() {
     if (!await callQuickerPopup(content, POPUP_TYPE.CONFIRM)) return;
     settings().profiles = profiles().filter(item => item.id !== profile.id);
     for (const [name, id] of Object.entries(settings().presetBindings)) {
-        if (id === profile.id) delete settings().presetBindings[name];
+        if (id === profile.id) {
+            delete settings().presetBindings[name];
+            delete settings().presetModels[name];
+        }
     }
     if (settings().activeProfileId === profile.id) settings().activeProfileId = null;
     if (settings().selectedProfileId === profile.id) settings().selectedProfileId = null;
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderProfiles();
 }
 
@@ -1463,7 +1695,7 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
         oai_settings.proxy_password = value;
         $('#openai_proxy_password').val(value).trigger('input');
         profile.updatedAt = new Date().toISOString();
-        saveSettingsDebounced();
+        scheduleSettingsSave();
         return true;
     }
     if (!value) return true;
@@ -1483,7 +1715,7 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
     profile.secretId = result.id;
     profile.needsSecret = false;
     profile.updatedAt = new Date().toISOString();
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     if (!result.exposureAvailable) toastr.warning('凭据已保存；findSecret 无权限，无法检查历史密钥是否同值。');
     return true;
 }
@@ -1549,7 +1781,7 @@ async function addCustomModel() {
     profile.availableModels = normalizeModelList([...(profile.availableModels || []), model]);
     profile.customized = true;
     profile.updatedAt = new Date().toISOString();
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderModelControl(profile);
     $('#quicker_api_custom_model').val(model);
     syncEditorModelToNative();
@@ -1644,7 +1876,7 @@ async function fetchModelsForProfile(profile, endpoint) {
         if (profile.secretId && !boundSecretExists) {
             profile.secretId = '';
             profile.needsSecret = true;
-            saveSettingsDebounced();
+            scheduleSettingsSave();
             updateCredentialEditor(profile);
         }
         desiredSecretId = boundSecretExists ? profile.secretId : await ensureEmptySecret(SECRET_KEYS.CUSTOM);
@@ -1684,7 +1916,7 @@ async function fetchModelsForProfile(profile, endpoint) {
 async function fetchCustomModels() {
     const profile = selectedProfile();
     if (!profile || profile.format !== 'openai') return toastr.info('请先选择并保存 OpenAI Compatible 配置。');
-    if (normalizeText($('#quicker_api_key_input').val())) return toastr.info('请先点击保存按钮保存当前 Key，再获取模型。');
+    if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('请先点击保存按钮保存当前 Key，再获取模型。');
     const editorUrl = normalizeText($('#quicker_api_url').val());
     if (!editorUrl) return toastr.warning('请先填写 Custom URL。');
     if (editorUrl !== normalizeText(profile.endpoint)) return toastr.info('URL 已变化，请先保存配置；保存会清空旧远端快照并保留已选模型。');
@@ -1694,7 +1926,7 @@ async function fetchCustomModels() {
         profile.fetchedFromEndpoint = editorUrl;
         if (!profile.customized) profile.availableModels = normalizeModelList([profile.model, ...result.models]);
         profile.updatedAt = new Date().toISOString();
-        saveSettingsDebounced();
+        scheduleSettingsSave();
         renderModelControl(profile);
         $('#quicker_api_custom_model').val(profile.model);
         toastr.success(`通过${result.route}获取 ${result.models.length} 个模型。`);
@@ -1709,7 +1941,7 @@ async function fetchCustomModels() {
 async function manageCustomModels() {
     const profile = selectedProfile();
     if (!profile || profile.format !== 'openai') return toastr.info('请先选择并保存 OpenAI Compatible 配置。');
-    if (normalizeText($('#quicker_api_key_input').val())) return toastr.info('Key 尚未保存，请先点击保存按钮再管理或获取模型。');
+    if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('Key 尚未保存，请先点击保存按钮再管理或获取模型。');
     const endpoint = normalizeText($('#quicker_api_url').val());
     if (endpoint !== normalizeText(profile.endpoint)) return toastr.info('URL 已变化，请先保存配置再管理模型。');
 
@@ -1902,7 +2134,7 @@ async function manageCustomModels() {
     profile.customized = draft.customized;
     profile.fetchedFromEndpoint = draft.fetchedFromEndpoint;
     profile.updatedAt = new Date().toISOString();
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderModelControl(profile);
     $('#quicker_api_custom_model').val(draft.current);
     syncEditorModelToNative();
@@ -2006,9 +2238,9 @@ async function manageQuickActions() {
     const header = $('<header class="quicker-api__quick-header">');
     const title = $('<div class="quicker-api__quick-title"><i class="fa-solid fa-bolt"></i><span>便捷按钮管理</span></div>');
     const placementButton = $('<button type="button" class="menu_button" title="入口位置" aria-label="设置便捷入口位置"><i class="fa-solid fa-gear"></i><span>位置设置</span></button>');
-    const saveAll = $('<button type="button" class="menu_button quicker-api__save-button"><i class="fa-solid fa-floppy-disk"></i><span>保存</span></button>');
+    const saveAll = $('<button type="button" class="menu_button quicker-api__save-button" title="保存全部方案到 SillyTavern" aria-label="保存全部方案到 SillyTavern"><i class="fa-solid fa-floppy-disk"></i><span>保存</span></button>');
     const close = $('<button type="button" class="menu_button" title="关闭并丢弃更改" aria-label="关闭并丢弃更改"><i class="fa-solid fa-xmark"></i></button>');
-    header.append(title.append(placementButton), $('<div class="quicker-api__quick-header-actions">').append(saveAll, close));
+    header.append(title, $('<div class="quicker-api__quick-header-actions">').append(placementButton, saveAll, close));
     const add = $('<button class="menu_button" type="button"><i class="fa-solid fa-plus"></i><span>新增方案</span></button>');
     const list = $('<div class="quicker-api__quick-list">');
     const listItems = $('<div class="quicker-api__quick-list-items" role="listbox" aria-label="便捷方案">');
@@ -2016,7 +2248,10 @@ async function manageQuickActions() {
     const editor = $('<div class="quicker-api__quick-editor">');
     content.append(header, $('<div class="quicker-api__quick-columns">').append(list, editor));
 
-    const popup = new Popup(content, POPUP_TYPE.DISPLAY, '', { animation: 'none' });
+    let managerSaving = false;
+    const popup = new Popup(content, POPUP_TYPE.DISPLAY, '', {
+        animation: 'none', onClosing: () => !managerSaving || teardownPending,
+    });
     let managerOpen = true;
     ownedPopups.add(popup);
     const selectAction = (id, force = false) => {
@@ -2165,14 +2400,15 @@ async function manageQuickActions() {
     placementButton.on('click', () => void chooseQuickActionPlacement(draftPlacement, value => {
         draftPlacement = value;
         settings().quickActionPlacement = value;
-        saveSettingsDebounced();
+        scheduleSettingsSave();
         ensureQuickActionEntries();
         toastr.success('便捷入口位置已应用。');
     }));
     close.on('click', () => void popup.completeCancelled());
-    saveAll.on('click', () => {
+    saveAll.on('click', async () => {
+        if (detailDraft && JSON.stringify(detailDraft) !== detailBaseline) return toastr.warning('当前方案还有未确认的修改，请先点击“保存方案”或“取消”。');
         const invalid = globalDraft.find(action => !action.preset && !action.profileId && !action.model);
-        if (invalid) return toastr.warning('请先在右侧保存每个方案；每项至少需要 preset、Profile 或 model。');
+        if (invalid) return toastr.warning('请先点击“保存方案”确认每个方案；每项至少需要 preset、Profile 或 model。');
         const validProfileIds = new Set(profiles().map(profile => profile.id));
         if (globalDraft.some(action => action.profileId && !validProfileIds.has(action.profileId))) return toastr.warning('方案引用了已不存在的 Profile，请重新选择并保存方案。');
         const validPresetNames = new Set($('#settings_preset_openai option').map((_, option) => normalizeText(option.textContent)).get());
@@ -2181,7 +2417,25 @@ async function manageQuickActions() {
             action.name = sanitizeName(action.name) || `方案${index + 1}`;
             action.sequence = index;
         });
-        void popup.completeAffirmative();
+        if (managerSaving) return;
+        managerSaving = true;
+        content.find('.quicker-api__quick-columns').prop('inert', true);
+        placementButton.prop('disabled', true);
+        settings().quickActions = structuredClone(globalDraft);
+        settings().quickActionPlacement = draftPlacement;
+        saveAll.prop('disabled', true);
+        close.prop('disabled', true);
+        const saved = await persistSettingsNow();
+        managerSaving = false;
+        content.find('.quicker-api__quick-columns').prop('inert', false);
+        placementButton.prop('disabled', false);
+        saveAll.prop('disabled', false);
+        close.prop('disabled', false);
+        if (saved && managerOpen) {
+            ensureQuickActionEntries();
+            toastr.success('便捷方案已保存到 SillyTavern。');
+            void popup.completeAffirmative();
+        }
     });
     render();
     let result = null;
@@ -2192,9 +2446,6 @@ async function manageQuickActions() {
         ownedPopups.delete(popup);
     }
     if (!result || extensionDisabled || teardownPending) return;
-    settings().quickActions = globalDraft;
-    settings().quickActionPlacement = draftPlacement;
-    saveSettingsDebounced();
     ensureQuickActionEntries();
 }
 
@@ -2264,7 +2515,7 @@ async function applyProfileById(profileId, token = quickActionTransaction, { app
     if (!profile || token !== quickActionTransaction) return false;
     const generation = ++profileSelectionGeneration;
     settings().selectedProfileId = profile.id;
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderProfiles(profile.id);
     if (manageTransition) beginPresetTransition();
     try {
@@ -2494,7 +2745,7 @@ function handleNativePresetChangeBefore({ presetName } = {}) {
     const profile = profiles().find(item => item.id === settings().presetBindings[name]);
     if (profile) {
         settings().selectedProfileId = profile.id;
-        saveSettingsDebounced();
+        scheduleSettingsSave();
         renderProfiles(profile.id);
     }
     return enqueueOperation(async () => {
@@ -2516,7 +2767,7 @@ async function handleNativePresetChange() {
     try {
         if (!profile) {
             settings().activeProfileId = null;
-            saveSettingsDebounced();
+            scheduleSettingsSave();
             renderProfiles(settings().selectedProfileId);
             setStatus('当前 preset 未绑定。', 'warning');
             return false;
@@ -2524,7 +2775,8 @@ async function handleNativePresetChange() {
         return await enqueueOperation(async () => {
             if (generation !== profileSelectionGeneration) return false;
             const applied = await applyProfile(profile, generation, true, false);
-            if (!applied) setStatus('所选 Profile 未应用。', 'warning');
+            if (applied) restoreBoundPresetModel(presetName, profile);
+            else setStatus('所选 Profile 未应用。', 'warning');
             return applied;
         });
     } finally {
@@ -2538,40 +2790,95 @@ function handlePresetRenamed({ apiId, oldName, newName } = {}) {
     if (!profileId) return;
     delete settings().presetBindings[oldName];
     settings().presetBindings[newName] = profileId;
-    saveSettingsDebounced();
+    if (Object.hasOwn(settings().presetModels, oldName)) {
+        settings().presetModels[newName] = settings().presetModels[oldName];
+        delete settings().presetModels[oldName];
+    }
+    scheduleSettingsSave();
     renderProfiles(settings().selectedProfileId);
 }
 
 function handlePresetDeleted({ apiId, name } = {}) {
     if (extensionDisabled || apiId !== 'openai' || !name || !settings().presetBindings[name]) return;
     delete settings().presetBindings[name];
-    saveSettingsDebounced();
+    delete settings().presetModels[name];
+    scheduleSettingsSave();
     renderProfiles(settings().selectedProfileId);
 }
 
-function bindPresetAfterVerifiedSave(name, profileId) {
-    const presetName = normalizeText(name);
-    if (!presetName || !profiles().some(profile => profile.id === profileId)) return;
-    settings().presetBindings[presetName] = profileId;
-    editorModelBaseline = getEditorModel();
-    saveSettingsDebounced();
+function restoreBoundPresetModel(name, profile) {
+    const model = boundPresetModel(name, profile);
+    renderModelControl(profile, model);
+    syncEditorModelToNative();
+    editorModelBaseline = getEditorModel(profile.format);
     renderStatus();
+}
+
+function bindPresetAfterVerifiedSave(name, intent, preset) {
+    if (extensionDisabled || teardownPending) return;
+    const presetName = normalizeText(name);
+    const profile = profiles().find(item => item.id === intent.profileId);
+    if (!presetName || !profile || profile.format !== intent.format) return;
+    const config = FORMATS[profile.format];
+    if (preset?.chat_completion_source !== config.source || typeof preset[config.modelField] !== 'string') return;
+    settings().presetBindings[presetName] = profile.id;
+    settings().presetModels[presetName] = presetModelSnapshot(profile, preset[config.modelField]);
+    if (currentPresetName() === presetName && selectedProfile()?.id === profile.id
+        && getEditorModel() === normalizeText(preset[config.modelField])) {
+        editorModelBaseline = getEditorModel();
+    }
+    scheduleSettingsSave();
+    renderStatus();
+}
+
+function clearNativePresetSaveIntent() {
+    nativePresetSaveIntent = null;
+    clearInterval(nativeCreateMonitor);
+    clearTimeout(nativeIntentExpiry);
+    nativeCreateMonitor = null;
+    nativeIntentExpiry = null;
 }
 
 function monitorNativeCreatePopup(intent) {
     let popupSeen = false;
-    const startedAt = Date.now();
-    const timer = setInterval(() => {
-        if (nativePresetSaveIntent !== intent) return clearInterval(timer);
+    nativeCreateMonitor = setInterval(() => {
+        if (nativePresetSaveIntent !== intent) return clearInterval(nativeCreateMonitor);
         const popupOpen = Boolean(document.querySelector('dialog.popup[open], .popup[open]'));
         popupSeen ||= popupOpen;
-        if ((popupSeen && !popupOpen) || Date.now() - startedAt > 120000) {
-            clearInterval(timer);
-            setTimeout(() => {
-                if (nativePresetSaveIntent === intent) nativePresetSaveIntent = null;
-            }, 3000);
-        }
+        if ((popupSeen && !popupOpen) || Date.now() > intent.expiresAt) clearNativePresetSaveIntent();
     }, 100);
+}
+
+function requestPath(resource) {
+    try {
+        const url = new URL(typeof resource === 'string' || resource instanceof URL ? resource : resource?.url, globalThis.location.href);
+        return url.origin === globalThis.location.origin ? url.pathname : '';
+    } catch {
+        return '';
+    }
+}
+
+async function requestJson(resource, options) {
+    try {
+        if (typeof options?.body === 'string') return JSON.parse(options.body);
+        if (typeof Request !== 'undefined' && resource instanceof Request && !options?.body) return await resource.clone().json();
+    } catch {
+        // An unrelated/non-JSON request must pass through unchanged.
+    }
+    return null;
+}
+
+function matchesPresetSaveIntent(intent, body) {
+    if (!intent || extensionDisabled || teardownPending || Date.now() > intent.expiresAt) return false;
+    if (intent.generation !== profileSelectionGeneration || pendingOperations || presetTransitionBlocked) return false;
+    if (body?.apiId !== 'openai' || !normalizeText(body.name)) return false;
+    if (intent.type === 'update' && normalizeText(body.name) !== intent.presetName) return false;
+    const profile = selectedProfile();
+    if (profile?.id !== intent.profileId || settings().activeProfileId !== profile.id || profile.format !== intent.format) return false;
+    const config = FORMATS[intent.format];
+    return body.preset?.chat_completion_source === config.source
+        && normalizeText(body.preset[config.modelField]) === intent.model
+        && normalizeText(body.preset[config.endpointField]) === normalizeText(profile.endpoint);
 }
 
 function installPresetSaveObserver() {
@@ -2579,29 +2886,42 @@ function installPresetSaveObserver() {
     const stableFetchDelegate = globalThis.fetch;
     originalFetch = stableFetchDelegate;
     presetObservedFetch = async function quickerApiObservedFetch(resource, options = {}) {
-        const url = typeof resource === 'string' ? resource : resource?.url;
+        const path = requestPath(resource);
+        const method = String(options.method || resource?.method || 'GET').toUpperCase();
         const intent = nativePresetSaveIntent;
-        const observesPresetSave = intent && normalizeText(url).includes('/api/presets/save');
         let body = null;
-        if (observesPresetSave) {
-            nativePresetSaveIntent = null;
-            try {
-                body = JSON.parse(String(options?.body || 'null'));
-            } catch {
-                body = null;
+        let observedIntent = null;
+        let settingsSnapshot = '';
+        if (method === 'POST' && path === '/api/settings/save' && !extensionDisabled && !teardownPending) {
+            const payload = await requestJson(resource, options);
+            if (payload?.extension_settings?.[MODULE_NAME]) settingsSnapshot = JSON.stringify(payload.extension_settings[MODULE_NAME]);
+        }
+        if (method === 'POST' && path === '/api/presets/save' && intent) {
+            body = await requestJson(resource, options);
+            if (nativePresetSaveIntent === intent && matchesPresetSaveIntent(intent, body)) {
+                observedIntent = intent;
+                clearNativePresetSaveIntent();
+                latestPresetSaves.set(normalizeText(body.name), intent.sequence);
             }
         }
-        // Keep a stable delegate in this closure. A later extension may wrap our
-        // wrapper, so teardown must never invalidate its downstream delegate.
-        const response = await stableFetchDelegate.apply(this, arguments);
-        if (!observesPresetSave) return response;
-        if (!response.ok || body?.apiId !== 'openai') return response;
+        // Keep a stable delegate: later extensions may still call this wrapper
+        // after teardown. Never mutate the request, response, or their bodies.
+        let response;
+        try {
+            response = await stableFetchDelegate.apply(this, arguments);
+        } catch (error) {
+            if (settingsSnapshot) finishSettingsSave(settingsSnapshot, false);
+            throw error;
+        }
+        if (settingsSnapshot) finishSettingsSave(settingsSnapshot, response.ok);
+        if (!observedIntent || !response.ok || extensionDisabled || teardownPending) return response;
         try {
             const result = await response.clone().json();
-            const savedName = normalizeText(result?.name || body?.name);
-            const validUpdate = intent.type === 'update' && savedName === intent.presetName;
-            const validCreate = intent.type === 'create' && savedName && !intent.knownPresetNames.has(savedName.toLocaleLowerCase());
-            if (validUpdate || validCreate) bindPresetAfterVerifiedSave(savedName, intent.profileId);
+            const savedName = normalizeText(result?.name);
+            const validName = savedName && (observedIntent.type === 'create' || savedName === observedIntent.presetName);
+            if (validName && latestPresetSaves.get(normalizeText(body.name)) === observedIntent.sequence) {
+                bindPresetAfterVerifiedSave(savedName, observedIntent, body.preset);
+            }
         } catch (error) {
             console.warn('[QuickerApi] Could not verify native preset save response:', error);
         }
@@ -2610,28 +2930,52 @@ function installPresetSaveObserver() {
     globalThis.fetch = presetObservedFetch;
 }
 
+function captureNativePresetSave(event, type) {
+    clearNativePresetSaveIntent();
+    if (extensionDisabled || teardownPending) return;
+    if (!SUPPORTED_SOURCES.has(oai_settings.chat_completion_source)) return;
+    const profile = selectedProfile();
+    const stop = message => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        toastr.warning(message);
+    };
+    if (pendingOperations || presetTransitionBlocked) return stop('API 配置正在切换，请完成后再保存预设。');
+    if (!profile) return; // Leave purely native saves/new unsaved Profiles alone.
+    if (settings().activeProfileId !== profile.id) return stop('所选 API 配置尚未安全应用，请先应用或保存 API 配置。');
+    if (profile.format !== normalizeFormat($('#quicker_api_format').val())
+        || FORMATS[profile.format].source !== oai_settings.chat_completion_source
+        || normalizeText($('#quicker_api_url').val()) !== normalizeText(profile.endpoint)
+        || (keyEditorDirty && normalizeText($('#quicker_api_key_input').val()))) {
+        return stop('URL、Key 或格式有未保存修改，请先点击 Quicker Api 的“保存 API 设置”。仅切换模型无需这一步。');
+    }
+    // Native saveOpenAIPreset snapshots oai_settings synchronously in its click
+    // handler. Synchronize BEFORE that handler, not after observing its fetch.
+    syncEditorModelToNative();
+    const intent = {
+        type, profileId: profile.id, format: profile.format, model: getEditorModel(),
+        presetName: currentPresetName(), generation: profileSelectionGeneration,
+        sequence: ++presetSaveSequence, expiresAt: Date.now() + (type === 'create' ? 120000 : 5000),
+    };
+    nativePresetSaveIntent = intent;
+    nativeIntentExpiry = setTimeout(() => {
+        if (nativePresetSaveIntent === intent) clearNativePresetSaveIntent();
+    }, type === 'create' ? 120000 : 5000);
+    if (type === 'create') monitorNativeCreatePopup(intent);
+}
+
 function bindNativePresetSaveCapture() {
-    nativePresetCaptureHandlers.update = () => {
-        if (extensionDisabled) return;
-        const profile = selectedProfile();
-        nativePresetSaveIntent = profile ? {
-            type: 'update', profileId: profile.id, presetName: currentPresetName(),
-        } : null;
-        const intent = nativePresetSaveIntent;
-        setTimeout(() => {
-            if (nativePresetSaveIntent === intent) nativePresetSaveIntent = null;
-        }, 1000);
+    nativePresetCaptureHandlers.update = event => captureNativePresetSave(event, 'update');
+    nativePresetCaptureHandlers.create = event => captureNativePresetSave(event, 'create');
+    nativePresetCaptureHandlers.cancel = event => {
+        if (nativePresetSaveIntent?.type !== 'create') return;
+        if ((event.type === 'keydown' && event.key === 'Escape')
+            || (event.type === 'click' && event.target?.closest?.('.popup-button-cancel, .popup-button-close'))) {
+            clearNativePresetSaveIntent();
+        }
     };
-    nativePresetCaptureHandlers.create = () => {
-        if (extensionDisabled) return;
-        const profile = selectedProfile();
-        nativePresetSaveIntent = profile ? {
-            type: 'create',
-            profileId: profile.id,
-            knownPresetNames: new Set($('#settings_preset_openai option').map((_, option) => normalizeText(option.textContent).toLocaleLowerCase()).get()),
-        } : null;
-        if (nativePresetSaveIntent) monitorNativeCreatePopup(nativePresetSaveIntent);
-    };
+    document.addEventListener('click', nativePresetCaptureHandlers.cancel, true);
+    document.addEventListener('keydown', nativePresetCaptureHandlers.cancel, true);
     document.getElementById('update_oai_preset')?.addEventListener('click', nativePresetCaptureHandlers.update, true);
     document.getElementById('new_oai_preset')?.addEventListener('click', nativePresetCaptureHandlers.create, true);
 }
@@ -2639,11 +2983,14 @@ function bindNativePresetSaveCapture() {
 function bindEvents() {
     installPresetSaveObserver();
     bindNativePresetSaveCapture();
+    $('#quicker_api_toggle').on('click', togglePanel);
+    window.addEventListener('pagehide', flushPanelState);
+    window.addEventListener('beforeunload', warnBeforeLeaving);
     $('#quicker_api_profile_select').on('change', function () {
         clearKeyEditor();
         const profile = profiles().find(item => item.id === String($(this).val())) || null;
         settings().selectedProfileId = profile?.id || null;
-        saveSettingsDebounced();
+        scheduleSettingsSave();
         if (!profile) return renderStatus();
         $('#quicker_api_format').val(profile.format);
         void applyProfileById(profile.id, quickActionTransaction, { applyModel: true, manageTransition: true });
@@ -2681,7 +3028,7 @@ function bindEvents() {
         $('#quicker_api_native_key_manager').attr('data-key', FORMATS[format].secretKey).data('key', FORMATS[format].secretKey).toggle(!proxyMode);
         renderStatus();
     });
-    $('#quicker_api_key_input').on('input', renderStatus);
+    $('#quicker_api_key_input').on('input', () => { keyEditorDirty = true; renderStatus(); });
     $(document).on('input.quickerApi', '#custom_include_body, #custom_exclude_body, #custom_include_headers', renderStatus);
     $(document).on('change.quickerApi', '#quicker_api_custom_model, #quicker_api_provider_model', () => {
         syncEditorModelToNative();
@@ -2691,6 +3038,9 @@ function bindEvents() {
     $(document).on('click.quickerApi', '#quicker_api_fetch_models', () => void enqueueOperation(fetchCustomModels));
     $(document).on('click.quickerApi', '#quicker_api_manage_models', manageCustomModels);
     $(document).on('click.quickerApi', '.quicker-api__manage-actions', () => void manageQuickActions());
+    $('#custom_model_id').on('input.quickerApi', handleNativeModelChange);
+    $('#model_claude_select, #model_google_select').on('change.quickerApi', handleNativeModelChange);
+    eventSource.on(event_types.CHATCOMPLETION_MODEL_CHANGED, handleNativeModelChange);
     $('#chat_completion_source').on('change.quickerApi', function () {
         updatePanelVisibility();
         const entry = Object.entries(FORMATS).find(([, config]) => config.source === String($(this).val()));
@@ -2741,20 +3091,22 @@ function updatePanelVisibility() {
 async function restoreInitialProfileSelection() {
     const currentPreset = currentPresetName();
     const boundId = currentPreset ? settings().presetBindings[currentPreset] : '';
-    let target = profiles().find(profile => profile.id === settings().selectedProfileId) || null;
-    if (!target) target = profiles().find(profile => profile.id === boundId) || null;
+    let target = profiles().find(profile => profile.id === boundId) || null;
+    if (!target) target = profiles().find(profile => profile.id === settings().selectedProfileId) || null;
     if (!target) target = profiles().find(profile => profile.id === settings().activeProfileId) || null;
     if (!target) target = profiles().find(profile => profileMatchesNative(profile)) || null;
     if (!target && profiles().length === 1) target = profiles()[0];
     settings().selectedProfileId = target?.id || null;
     settings().activeProfileId = null;
-    saveSettingsDebounced();
+    scheduleSettingsSave();
     renderProfiles(target?.id || null);
     if (!target) return;
     const generation = ++profileSelectionGeneration;
     beginPresetTransition();
     try {
-        const applied = await applyProfile(target, generation, true);
+        const isBound = target.id === boundId;
+        const applied = await applyProfile(target, generation, true, !isBound);
+        if (applied && isBound) restoreBoundPresetModel(currentPreset, target);
         if (!applied) renderStatus('所选 Profile 未应用。');
     } finally {
         endPresetTransition();
@@ -2764,6 +3116,8 @@ async function restoreInitialProfileSelection() {
 async function teardownQuickerApi() {
     if (teardownPending || extensionDisabled) return false;
     teardownPending = true;
+    flushPanelState();
+    window.removeEventListener('pagehide', flushPanelState);
     beginPresetTransition();
     setOperationControlsDisabled(true);
     quickActionObserver?.disconnect();
@@ -2803,6 +3157,7 @@ async function teardownQuickerApi() {
     $(window).off('.quickerApiMenu');
     $(globalThis.visualViewport).off('.quickerApiMenu');
     $('#custom_api_url_text, #custom_model_id, #openai_reverse_proxy, #model_claude_select, #model_google_select, #chat_completion_source').off('.quickerApi');
+    eventSource.removeListener(event_types.CHATCOMPLETION_MODEL_CHANGED, handleNativeModelChange);
     eventSource.removeListener(event_types.OAI_PRESET_CHANGED_BEFORE, handleNativePresetChangeBefore);
     eventSource.removeListener(event_types.OAI_PRESET_CHANGED_AFTER, handleNativePresetChange);
     eventSource.removeListener(event_types.PRESET_RENAMED, handlePresetRenamed);
@@ -2812,9 +3167,18 @@ async function teardownQuickerApi() {
     const createButton = document.getElementById('new_oai_preset');
     if (nativePresetCaptureHandlers.update) updateButton?.removeEventListener('click', nativePresetCaptureHandlers.update, true);
     if (nativePresetCaptureHandlers.create) createButton?.removeEventListener('click', nativePresetCaptureHandlers.create, true);
+    if (nativePresetCaptureHandlers.cancel) {
+        document.removeEventListener('click', nativePresetCaptureHandlers.cancel, true);
+        document.removeEventListener('keydown', nativePresetCaptureHandlers.cancel, true);
+    }
     delete nativePresetCaptureHandlers.update;
     delete nativePresetCaptureHandlers.create;
-    nativePresetSaveIntent = null;
+    delete nativePresetCaptureHandlers.cancel;
+    clearNativePresetSaveIntent();
+    clearTimeout(settingsSaveTimer);
+    for (const waiter of [...settingsSaveWaiters]) waiter.complete(false);
+    window.removeEventListener('beforeunload', warnBeforeLeaving);
+    latestPresetSaves.clear();
     if (presetObservedFetch && globalThis.fetch === presetObservedFetch) globalThis.fetch = originalFetch;
     originalFetch = null;
     presetObservedFetch = null;

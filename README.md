@@ -49,6 +49,7 @@ Quicker Api 界面直接显示在 SillyTavern 原生的 **API 连接配置** 中
 - **模型列表管理** — 从 API 获取模型，也可以手动添加、编辑、排序和筛选模型
 - **迁移原生配置** — 批量导入 SillyTavern 当前的 OpenAI 配置
 - **预设联动** — 可以让不同的对话补全预设自动使用对应的 API 配置和模型
+- **面板折叠** — 收起后只显示“格式 · 配置名 · 模型名称”，展开/收起状态仅由当前浏览器记忆
 - **便捷方案** — 一键组合切换“对话补全预设 + API 配置 + 模型”
 - **保存附加参数** — 配置与附加参数一起保存
 
@@ -169,6 +170,16 @@ OpenAI Compatible 配置提供：
 
 导入不会删除或修改原来的 SillyTavern 配置。
 
+## 折叠面板
+
+点击 Quicker Api 标题栏可收起/展开面板，也支持聚焦后按 Enter 或空格。
+
+收起后仅显示：
+
+```text
+OpenAI Compatible · 我的配置 · gpt-4.1
+```
+
 ## 对话补全预设联动
 
 Quicker Api 可以让 SillyTavern 的对话补全预设记住 API 配置。
@@ -183,6 +194,8 @@ Quicker Api 可以让 SillyTavern 的对话补全预设记住 API 配置。
 以后切换这个预设时，插件会自动恢复绑定的 API 配置和密钥。
 
 同一个 API 配置可以绑定多个预设，每个预设可以保存不同模型。
+
+已绑定的 Quicker Api 预设会恢复其 API 配置及模型，不依赖原生“预设绑定连接”开关；未绑定的预设仍由 SillyTavern 自行处理。
 
 ## 便捷方案
 
@@ -238,13 +251,18 @@ allowKeysExposure: true
 > 开启 `allowKeysExposure` 后，浏览器端扩展可以请求密钥明文。请只安装可信扩展，不要在不受信任的公网实例上随意开启。
 
 
-## 数据保存位置
+## 数据保存与跨浏览器使用
 
-- API 配置和便捷方案保存在 SillyTavern 的 `extension_settings.quickerApi`
-- 密钥保存在 SillyTavern 原生 Secrets 中
-- Reverse Proxy Password 保存在 SillyTavern 原生 Reverse Proxy Preset 中
+- API 配置、模型列表、便捷方案、入口位置、快捷 URL 和预设绑定保存在 SillyTavern 的 `extension_settings.quickerApi`。
+- **例外：面板展开/收起状态仅保存在当前浏览器的 localStorage，不属于服务端配置。**
+- 上述 API 配置等共享数据通过原生 `/api/settings/save` 保存到当前用户的 `settings.json`（通常位于 `data/<用户>/settings.json`，以sillytavern的数据目录设置为准），不依赖浏览器本地存储。
+- 密钥保存在 SillyTavern 原生 Secrets 中，Reverse Proxy Password 保存在原生 Reverse Proxy Preset 中。
 
-插件不会把密钥明文写入 Profile、导出文件或 README。
+API 配置保存和便捷方案总保存会等待服务器确认。保存失败或超时会弹出提示，请检查连接后重试保存，不要直接刷新以免丢失未保存的修改。有未确认的设置时，离页会尝试触发浏览器提醒，但移动端强制结束进程不保证提醒生效。
+
+这沿用 SillyTavern 的设置机制，**不是实时推送，也不跨不同服务器/用户自动同步**。不要在多个长期打开的浏览器中同时修改设置：旧页面可能覆盖新页面的更改。切换浏览器编辑前，请先完成保存并在目标浏览器刷新。
+
+插件不会把密钥编辑框的明文写入 Profile、测试日志或 README；不要在自定义 Headers/Body 中填写不希望保存在用户设置里的敏感信息。
 
 卸载插件后，SillyTavern 原生密钥和最后一次应用的连接字段仍然保留。
 
