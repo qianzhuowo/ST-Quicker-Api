@@ -1,2 +1,3 @@
-# Local regression tests; keep them out of the published extension.
-/tests/
+# Keep regression sources versioned alongside the compatibility layer.
+# Only optional local test artifacts should stay out of the published extension.
+/tests/artifacts/

@@ -1,6 +1,6 @@
 # Quicker Api
 
-Quicker Api 是 SillyTavern 原生“API 连接配置”的轻量增强面板，用来更方便地管理 API 配置。
+Quicker Api 是 SillyTavern 原生“API 连接配置”的轻量增强面板，用来更方便地管理 API 配置，同时通过同一份代码适配 TauriTavern。
 
 适合需要在多个 API 地址、密钥和模型之间频繁切换的用户。
 
@@ -9,6 +9,13 @@ Quicker Api 是 SillyTavern 原生“API 连接配置”的轻量增强面板，
 ## 使用前提
 
 Quicker Api 界面直接显示在 SillyTavern 原生的 **API 连接配置** 中，使用前需要先将 SillyTavern 的 **聊天补全来源** 切换至 **自定义（兼容 OpenAI）** / **Claude** / **Google AI Studio**。
+
+## TauriTavern 兼容
+
+- Anthropic/Gemini 仍只由插件管理“排除主体参数”。TauriTavern 原生已有的该来源附加 Body/Headers 会保留，不被插件顺带清空，也不随 Quicker Profile 切换。
+- 暂不新增 TauriTavern 的 OpenAI Responses、Claude Messages、Gemini Interactions 等 Custom 子协议 Profile。它们不会被当作普通 OpenAI Compatible 配置导入。
+
+**升级提醒：** 旧版插件在 TauriTavern 中可能已经漏存附加参数。升级不能凭空恢复未保存的内容；更新前建议备份原生附加参数，更新后重新填写并保存受影响的 Profile。既有 Profile 的数据结构无需转换。
 
 ## 功能预览
 
@@ -138,7 +145,7 @@ SillyTavern/public/scripts/extensions/third-party/
 - frequency_penalty
 ```
 
-发送前，Quicker Api 会确认配置的格式，再删除这些请求顶层字段。
+发送前，Quicker Api 会确认配置的格式，再删除这些请求顶层字段。在 TauriTavern 中，排除规则通过原生参数存储交给宿主后端，在最终请求主体上应用。
 
 ### 4. 管理密钥
 
@@ -255,7 +262,7 @@ allowKeysExposure: true
 
 - API 配置、模型列表、便捷方案、入口位置、快捷 URL 和预设绑定保存在 SillyTavern 的 `extension_settings.quickerApi`。
 - **例外：面板展开/收起状态仅保存在当前浏览器的 localStorage，不属于服务端配置。**
-- 上述 API 配置等共享数据通过原生 `/api/settings/save` 保存到当前用户的 `settings.json`（通常位于 `data/<用户>/settings.json`，以sillytavern的数据目录设置为准），不依赖浏览器本地存储。
+- 上述 API 配置等共享数据通过宿主原生设置机制保存，不依赖浏览器本地存储。SillyTavern 使用 `/api/settings/save` 写入当前用户的 `settings.json`（通常位于 `data/<用户>/settings.json`，以数据目录设置为准）；TauriTavern 也可能使用 `/api/settings/patch` 增量保存，实际数据目录由应用管理。
 - 密钥保存在 SillyTavern 原生 Secrets 中，Reverse Proxy Password 保存在原生 Reverse Proxy Preset 中。
 
 API 配置保存和便捷方案总保存会等待服务器确认。保存失败或超时会弹出提示，请检查连接后重试保存，不要直接刷新以免丢失未保存的修改。有未确认的设置时，离页会尝试触发浏览器提醒，但移动端强制结束进程不保证提醒生效。
@@ -273,6 +280,36 @@ API 配置保存和便捷方案总保存会等待服务器确认。保存失败�
 - OpenAI Compatible 支持附加 Body、附加 Headers 和排除参数；Anthropic/Gemini 仅支持排除请求顶层参数
 - 如果状态栏显示“安全阻断”，请重新检查或保存对应配置的密钥
 - 如果看不到便捷入口，请到“便捷按钮管理 → 位置设置”确认没有选择“不使用便捷按钮”
+
+## 开发与回归验证
+
+业务代码保留在 `index.js`；宿主差异集中在 `platform.js`。新增平台差异时优先扩展适配层，不在 Profile、密钥、预设和便捷方案中散落平台判断。
+
+测试需要 Node.js 22+。浏览器回归还需要 Chromium/Chrome/Edge，以及 SillyTavern 的 `public` 静态资源；插件不在 SillyTavern 目录内时，可设置 `ST_PUBLIC_DIR`，浏览器不在常见位置时可设置 `CHROME_PATH`。
+
+```powershell
+# 适配层单元测试（不需要浏览器）
+node --test tests/platform.test.mjs
+
+# 双宿主浏览器回归
+$env:QUICKER_TEST_HOST = 'sillytavern'
+node tests/regression.mjs
+$env:QUICKER_TEST_HOST = 'tauritavern'
+node tests/regression.mjs
+
+# 可选：直接加载本机 TauriTavern 源码中的参数访问器做契约验证
+$env:TT_SOURCE_DIR = 'E:\AiChat\TauriTavern-2.2.0'
+node --test tests/platform.test.mjs
+```
+
+浏览器测试仅使用内存模拟的设置/密钥接口、虚构 Profile 和临时浏览器目录，不连接真实模型、不读写真实账户配置。测试包含参数 A/B/空配置切换、跨来源隔离、原生编辑/保存、预设联动、便捷方案、启动恢复、导入、失败回滚、全量/增量保存失败与并发修改。
+
+更新到真实应用后，建议再手动检查：
+
+1. 在两个 Profile 中填写不同的 Body、排除规则和 Headers，保存后反复切换，重新打开原生附加参数弹窗核对。
+2. 发送到自己控制的测试端点，检查实际收到的请求主体和请求头；自动化测试不替代后端端到端验证。
+3. 切换绑定预设及便捷方案，重启应用后确认参数与配置仍一致。
+4. 检查 Anthropic/Gemini 的排除规则，以及切换 Profile 不会清空该来源其他原生参数。
 
 ## 卸载
 

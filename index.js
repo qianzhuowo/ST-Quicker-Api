@@ -5,6 +5,11 @@ import { Popup, POPUP_TYPE } from '../../../popup.js';
 import { cancelDebounce } from '../../../utils.js';
 import { eventSource, event_types, getRequestHeaders, saveSettings, saveSettingsDebounced } from '../../../../script.js';
 import { yaml } from '../../../../lib.js';
+import * as openaiHost from '../../../openai.js';
+import * as settingsHost from '../../../../script.js';
+import { createPlatformAdapter, inspectSettingsSave } from './platform.js';
+
+const platform = createPlatformAdapter({ openai: openaiHost, settingsApi: settingsHost, cancelDebounce, $: (...args) => $(...args) });
 
 const MODULE_NAME = 'quickerApi';
 const LEGACY_MODULE_NAME = 'customOpenAIProfiles';
@@ -90,6 +95,8 @@ const latestPresetSaves = new Map();
 let confirmedSettingsSnapshot = '';
 let settingsSaveState = 'saved';
 let settingsSaveTimer = null;
+let settingsRequestSequence = 0;
+let confirmedSettingsSequence = 0;
 const settingsSaveWaiters = new Set();
 let panelCollapsed = readBrowserPanelState();
 let panelSummaryText = '';
@@ -158,10 +165,10 @@ function scheduleSettingsSave() {
 async function persistSettingsNow() {
     if (extensionDisabled || teardownPending) return false;
     scheduleSettingsSave();
-    cancelDebounce(saveSettingsDebounced);
+    platform.cancelSettingsSave();
     const snapshot = JSON.stringify(settings());
-    // saveSettings catches its own errors and returns no result. Verify the
-    // exact plugin snapshot through the original settings POST response instead.
+    // Verify the exact plugin snapshot through the host's full/delta save
+    // response. A save event or a fulfilled promise alone is not confirmation.
     return await new Promise(resolve => {
         const waiter = { snapshot, complete: null };
         const timer = setTimeout(() => { finishSettingsSave(snapshot, false); waiter.complete(false); }, 15000);
@@ -171,7 +178,9 @@ async function persistSettingsNow() {
             resolve(success);
         };
         settingsSaveWaiters.add(waiter);
-        void saveSettings().catch(() => finishSettingsSave(snapshot, false));
+        void saveSettings().then(result => {
+            if (result === false) finishSettingsSave(snapshot, false);
+        }).catch(() => finishSettingsSave(snapshot, false));
     });
 }
 
@@ -611,27 +620,12 @@ function syncEditorConnectionToNative() {
     syncEditorModelToNative();
 }
 
-function nativeAdditionalParameters() {
-    return {
-        includeBody: String(oai_settings.custom_include_body || ''),
-        excludeBody: String(oai_settings.custom_exclude_body || ''),
-        includeHeaders: String(oai_settings.custom_include_headers || ''),
-    };
+function nativeAdditionalParameters(source) {
+    return platform.readAdditionalParameters(source);
 }
 
 function applyNativeAdditionalParameters(profile) {
-    const values = {
-        '#custom_include_body': String(profile?.includeBody || ''),
-        '#custom_exclude_body': String(profile?.excludeBody || ''),
-        '#custom_include_headers': String(profile?.includeHeaders || ''),
-    };
-    oai_settings.custom_include_body = values['#custom_include_body'];
-    oai_settings.custom_exclude_body = values['#custom_exclude_body'];
-    oai_settings.custom_include_headers = values['#custom_include_headers'];
-    for (const [selector, value] of Object.entries(values)) {
-        const input = $(selector);
-        if (input.length) input.val(value).trigger('input');
-    }
+    platform.writeAdditionalParameters(profile, FORMATS[profile.format].source);
 }
 
 function renderModelControl(profile = selectedProfile(), modelOverride = null) {
@@ -696,7 +690,7 @@ function renderProfiles(preferredId = null) {
 
 function profileMatchesNative(profile) {
     const config = FORMATS[profile.format];
-    if (oai_settings.chat_completion_source !== config.source) return false;
+    if (!platform.matchesSource(config.source)) return false;
     if (String(oai_settings[config.modelField] || '') !== profile.model) return false;
     if (String(oai_settings[config.endpointField] || '') !== profile.endpoint) return false;
     if (profile.format !== 'openai' && profile.endpoint) {
@@ -776,14 +770,14 @@ function endPresetTransition({ force = false } = {}) {
 }
 
 function requestMatchesProfile(profile, generateData) {
-    if (!profile || generateData.chat_completion_source !== FORMATS[profile.format].source) return false;
+    if (!profile || !platform.matchesSource(FORMATS[profile.format].source, generateData)) return false;
     if (String(generateData.model || '') !== profile.model) return false;
     const endpointField = profile.format === 'openai' ? 'custom_url' : 'reverse_proxy';
     return normalizeText(generateData[endpointField]) === normalizeText(profile.endpoint);
 }
 
 function excludeProfileBodyParameters(profile, generateData) {
-    if (!profile?.excludeBody || !requestMatchesProfile(profile, generateData)) return;
+    if (platform.handlesRequestExclusions || !profile?.excludeBody || !requestMatchesProfile(profile, generateData)) return;
     try {
         const parsed = yaml.parse(profile.excludeBody);
         const keys = Array.isArray(parsed)
@@ -915,12 +909,9 @@ async function ensureEmptySecret(key) {
 
 function snapshotNative() {
     return {
-        source: oai_settings.chat_completion_source,
         custom_url: String(oai_settings.custom_url || ''),
         custom_model: String(oai_settings.custom_model || ''),
-        custom_include_body: String(oai_settings.custom_include_body || ''),
-        custom_exclude_body: String(oai_settings.custom_exclude_body || ''),
-        custom_include_headers: String(oai_settings.custom_include_headers || ''),
+        connection: platform.snapshotConnectionState(),
         reverse_proxy: String(oai_settings.reverse_proxy || ''),
         claude_model: String(oai_settings.claude_model || ''),
         google_model: String(oai_settings.google_model || ''),
@@ -931,25 +922,17 @@ function snapshotNative() {
 function restoreNative(snapshot) {
     oai_settings.custom_url = snapshot.custom_url;
     oai_settings.custom_model = snapshot.custom_model;
-    oai_settings.custom_include_body = snapshot.custom_include_body;
-    oai_settings.custom_exclude_body = snapshot.custom_exclude_body;
-    oai_settings.custom_include_headers = snapshot.custom_include_headers;
     oai_settings.reverse_proxy = snapshot.reverse_proxy;
     oai_settings.claude_model = snapshot.claude_model;
     oai_settings.google_model = snapshot.google_model;
     oai_settings.proxy_password = snapshot.proxy_password;
     $('#custom_api_url_text').val(snapshot.custom_url).trigger('input');
     $('#custom_model_id').val(snapshot.custom_model).trigger('input');
-    applyNativeAdditionalParameters({
-        includeBody: snapshot.custom_include_body,
-        excludeBody: snapshot.custom_exclude_body,
-        includeHeaders: snapshot.custom_include_headers,
-    });
     $('#openai_reverse_proxy').val(snapshot.reverse_proxy).trigger('input');
     $('#openai_proxy_password').val(snapshot.proxy_password).trigger('input');
     $('#model_claude_select').val(snapshot.claude_model).trigger('change');
     $('#model_google_select').val(snapshot.google_model).trigger('change');
-    $('#chat_completion_source').val(snapshot.source).trigger('change');
+    platform.restoreConnectionState(snapshot.connection);
 }
 
 async function enterFailClosedState(message, affectedSecretKey = SECRET_KEYS.CUSTOM) {
@@ -959,7 +942,7 @@ async function enterFailClosedState(message, affectedSecretKey = SECRET_KEYS.CUS
         oai_settings.custom_model = '';
         $('#custom_api_url_text').val('').trigger('input');
         $('#custom_model_id').val('').trigger('input');
-        $('#chat_completion_source').val(chat_completion_sources.CUSTOM).trigger('change');
+        platform.selectSource(chat_completion_sources.CUSTOM);
     }
     settings().activeProfileId = null;
     if (safeId) {
@@ -1007,9 +990,7 @@ function applyNativeFields(profile, proxyPassword = '', applyModel = true) {
         oai_settings.proxy_password = proxyPassword;
         $('#openai_proxy_password').val(proxyPassword).trigger('input');
     }
-    if (oai_settings.chat_completion_source !== config.source) {
-        $('#chat_completion_source').val(config.source).trigger('change');
-    }
+    platform.selectSource(config.source);
 }
 
 function getBoundProxyPreset(profile) {
@@ -1156,6 +1137,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
 function captureNativeProfile(name, format, existing = {}) {
     const normalizedFormat = normalizeFormat(format);
     const config = FORMATS[normalizedFormat];
+    const additional = nativeAdditionalParameters(config.source);
     const endpoint = String(oai_settings[config.endpointField] || '');
     const proxyMode = normalizedFormat !== 'openai' && Boolean(endpoint);
     const activeSecret = getActiveSecret(config.secretKey);
@@ -1174,9 +1156,9 @@ function captureNativeProfile(name, format, existing = {}) {
         format: normalizedFormat,
         endpoint,
         model: getEditorModel(normalizedFormat),
-        includeBody: normalizedFormat === 'openai' ? String(oai_settings.custom_include_body || '') : '',
-        excludeBody: String(oai_settings.custom_exclude_body || ''),
-        includeHeaders: normalizedFormat === 'openai' ? String(oai_settings.custom_include_headers || '') : '',
+        includeBody: normalizedFormat === 'openai' ? additional.includeBody : '',
+        excludeBody: additional.excludeBody,
+        includeHeaders: normalizedFormat === 'openai' ? additional.includeHeaders : '',
         secretId,
         proxyPreset,
         needsSecret,
@@ -1401,15 +1383,13 @@ async function collectNativeImportCandidates(authoritative) {
 
     const activeCustom = authoritative[SECRET_KEYS.CUSTOM]?.find(entry => entry.active) || null;
     const currentCustomUrl = normalizeText(oai_settings.custom_url);
-    if (currentCustomUrl || oai_settings.custom_model || activeCustom) {
+    if (platform.supportsCustomConnection() && (currentCustomUrl || oai_settings.custom_model || activeCustom)) {
         await add({
             sourceRef: 'current-custom', sourceLabel: '当前自定义（兼容 OpenAI）',
             name: '当前 Custom 配置', format: 'openai', endpoint: currentCustomUrl,
             model: oai_settings.custom_model, sourceSecretKey: SECRET_KEYS.CUSTOM,
             sourceSecretId: activeCustom?.id,
-            includeBody: oai_settings.custom_include_body,
-            excludeBody: oai_settings.custom_exclude_body,
-            includeHeaders: oai_settings.custom_include_headers,
+            ...nativeAdditionalParameters(chat_completion_sources.CUSTOM),
         });
     }
 
@@ -2738,6 +2718,7 @@ function scheduleQuickActionEntries() {
 
 function handleNativePresetChangeBefore({ presetName } = {}) {
     if (extensionDisabled) return;
+    platform.rememberParameterEditors();
     const generation = ++profileSelectionGeneration;
     clearTimeout(presetChangeTimer);
     beginPresetTransition();
@@ -2757,6 +2738,7 @@ function handleNativePresetChangeBefore({ presetName } = {}) {
 
 async function handleNativePresetChange() {
     if (extensionDisabled) return false;
+    platform.syncParameterEditors();
     beginPresetTransition();
     const generation = ++profileSelectionGeneration;
     const quickActionOwnsBlock = Boolean(quickActionBlockingToken);
@@ -2891,10 +2873,12 @@ function installPresetSaveObserver() {
         const intent = nativePresetSaveIntent;
         let body = null;
         let observedIntent = null;
-        let settingsSnapshot = '';
-        if (method === 'POST' && path === '/api/settings/save' && !extensionDisabled && !teardownPending) {
-            const payload = await requestJson(resource, options);
-            if (payload?.extension_settings?.[MODULE_NAME]) settingsSnapshot = JSON.stringify(payload.extension_settings[MODULE_NAME]);
+        let settingsObservation = null;
+        const settingsSequence = ++settingsRequestSequence;
+        if (method === 'POST' && !extensionDisabled && !teardownPending) {
+            settingsObservation = await inspectSettingsSave({
+                path, resource, options, moduleName: MODULE_NAME, baselineSnapshot: confirmedSettingsSnapshot,
+            });
         }
         if (method === 'POST' && path === '/api/presets/save' && intent) {
             body = await requestJson(resource, options);
@@ -2910,10 +2894,16 @@ function installPresetSaveObserver() {
         try {
             response = await stableFetchDelegate.apply(this, arguments);
         } catch (error) {
-            if (settingsSnapshot) finishSettingsSave(settingsSnapshot, false);
+            if (settingsObservation) finishSettingsSave(settingsObservation.snapshot, false);
             throw error;
         }
-        if (settingsSnapshot) finishSettingsSave(settingsSnapshot, response.ok);
+        if (settingsObservation) {
+            const success = await settingsObservation.succeeded(response);
+            if (settingsSequence >= confirmedSettingsSequence) {
+                if (success) confirmedSettingsSequence = settingsSequence;
+                finishSettingsSave(settingsObservation.snapshot, success);
+            }
+        }
         if (!observedIntent || !response.ok || extensionDisabled || teardownPending) return response;
         try {
             const result = await response.clone().json();
@@ -2999,7 +2989,7 @@ function bindEvents() {
         clearKeyEditor();
         const format = normalizeFormat($(this).val());
         const source = FORMATS[format].source;
-        if (oai_settings.chat_completion_source !== source) $('#chat_completion_source').val(source).trigger('change');
+        platform.selectSource(source);
         $('#quicker_api_url').val(String(oai_settings[FORMATS[format].endpointField] || ''));
         const profile = selectedProfile()?.format === format ? selectedProfile() : null;
         renderModelControl(profile);
@@ -3042,6 +3032,7 @@ function bindEvents() {
     $('#model_claude_select, #model_google_select').on('change.quickerApi', handleNativeModelChange);
     eventSource.on(event_types.CHATCOMPLETION_MODEL_CHANGED, handleNativeModelChange);
     $('#chat_completion_source').on('change.quickerApi', function () {
+        platform.syncParameterEditors();
         updatePanelVisibility();
         const entry = Object.entries(FORMATS).find(([, config]) => config.source === String($(this).val()));
         if (!entry) return;
@@ -3061,6 +3052,7 @@ function updateAdditionalParametersButton() {
 }
 
 function configureAdditionalParametersPopup() {
+    platform.rememberParameterEditors();
     const excludeInput = document.getElementById('custom_exclude_body');
     if (!excludeInput || excludeInput.dataset.quickerApiConfigured === 'true') return;
     excludeInput.dataset.quickerApiConfigured = 'true';
@@ -3179,6 +3171,7 @@ async function teardownQuickerApi() {
     for (const waiter of [...settingsSaveWaiters]) waiter.complete(false);
     window.removeEventListener('beforeunload', warnBeforeLeaving);
     latestPresetSaves.clear();
+    platform.dispose();
     if (presetObservedFetch && globalThis.fetch === presetObservedFetch) globalThis.fetch = originalFetch;
     originalFetch = null;
     presetObservedFetch = null;
@@ -3219,6 +3212,7 @@ function watchForDomChanges() {
         if (entryMissing || qrChanged) scheduleQuickActionEntries();
     });
     quickActionObserver.observe(document.body, { childList: true, subtree: true });
+    configureAdditionalParametersPopup();
 }
 
 jQuery(() => {
