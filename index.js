@@ -456,6 +456,31 @@ function initializeSettings() {
     return true;
 }
 
+function keyExposureGuidance() {
+    if (platform.isTauriHost) {
+        return {
+            warning: '请在 TauriTavern 的“设置 → Misc（杂项）→ Allow Keys Exposure”中启用密钥明文访问，保存后重启 TauriTavern。',
+            title: '在 TauriTavern 中允许查看密钥',
+            intro: '打开 TauriTavern 的设置：',
+            steps: ['进入 Misc（杂项）', '启用 Allow Keys Exposure', '保存设置后重启 TauriTavern'],
+        };
+    }
+    return {
+        warning: '请在 config.yaml 中将 allowKeysExposure 设置为 true，然后重启 SillyTavern。',
+        title: '允许查看已保存密钥',
+        intro: '编辑 SillyTavern 的 config.yaml：',
+        code: 'allowKeysExposure: true',
+        steps: ['修改后重启 SillyTavern'],
+    };
+}
+
+function keyExposureHelpHtml() {
+    const guidance = keyExposureGuidance();
+    const steps = guidance.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('');
+    const code = guidance.code ? `<pre><code>${escapeHtml(guidance.code)}</code></pre>` : '';
+    return `<strong>${escapeHtml(guidance.title)}</strong><p>${escapeHtml(guidance.intro)}</p>${code}<ul>${steps}</ul><p>启用后，Quicker Api 才能：</p><ul><li>点击眼睛查看已保存密钥</li><li>复制已保存密钥</li></ul>`;
+}
+
 function toolbarHtml() {
     const formatOptions = Object.entries(FORMATS).filter(([format]) => format !== 'opencode' || platform.supportsOpenCode).map(([value, config]) => `<option value="${value}">${config.label}</option>`).join('');
     return `
@@ -505,6 +530,8 @@ function toolbarHtml() {
                 <div class="quicker-api__row quicker-api__key-row">
                     <input id="quicker_api_key_input" class="text_pole flex1 quicker-api__secret-masked" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="无凭据" />
                     <div class="quicker-api__key-actions">
+                        <span id="quicker_api_key_help" class="fa-solid fa-circle-question note-link-span quicker-api__key-help" tabindex="0" role="button" aria-label="查看密钥明文权限说明" aria-describedby="quicker_api_key_help_tooltip"></span>
+                        <aside id="quicker_api_key_help_tooltip" class="quicker-api__key-help-tooltip" role="tooltip">${keyExposureHelpHtml()}</aside>
                         <button id="quicker_api_reveal_key" class="menu_button" type="button" title="显示或隐藏密码" aria-label="显示或隐藏密码"><i class="fa-solid fa-eye-slash"></i></button>
                         <button id="quicker_api_copy_key" class="menu_button" type="button" title="复制密钥" aria-label="复制密钥"><i class="fa-solid fa-copy"></i></button>
                         <div id="quicker_api_native_key_manager" class="menu_button fa-solid fa-key fa-fw manage-api-keys" title="Manage API keys" aria-label="Manage API keys" data-i18n="[title]Manage API keys" data-key="api_key_custom"></div>
@@ -1811,7 +1838,7 @@ async function readBoundSecret(profile) {
     }
     const value = await findSecretBounded(FORMATS[profile.format].secretKey, profile.secretId);
     if (value === null) {
-        toastr.warning('当前实例未授予 findSecret 明文权限（allowKeysExposure）；已降级为仅显示标签和管理入口。');
+        toastr.warning(keyExposureGuidance().warning);
         renderStatus('密钥明文不可读');
         return null;
     }

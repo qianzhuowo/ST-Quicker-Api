@@ -250,9 +250,76 @@
 }
 
 .quicker-api__key-actions {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 0.4rem;
+}
+
+.quicker-api__key-help {
+    flex: 0 0 auto;
+    padding: 0.3rem;
+    color: var(--SmartThemeQuoteColor);
+    cursor: help;
+    opacity: 0.85;
+}
+
+.quicker-api__key-help:hover,
+.quicker-api__key-help:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--SmartThemeQuoteColor);
+    outline-offset: 2px;
+    border-radius: 50%;
+}
+
+.quicker-api__key-help-tooltip {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 0.55rem);
+    z-index: 10030;
+    display: none;
+    width: min(28rem, calc(100dvw - 2rem));
+    max-width: 80dvw;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    background: var(--SmartThemeBlurTintColor);
+    box-shadow: 0 0.45rem 1.25rem rgb(0 0 0 / 35%);
+    color: var(--SmartThemeBodyColor);
+    font-family: var(--mainFontFamily);
+    font-size: 0.88rem;
+    font-weight: 400;
+    line-height: 1.45;
+    text-align: left;
+    white-space: normal;
+}
+
+.quicker-api__key-help:hover + .quicker-api__key-help-tooltip,
+.quicker-api__key-help:focus + .quicker-api__key-help-tooltip,
+.quicker-api__key-help-tooltip:hover {
+    display: block;
+}
+
+.quicker-api__key-help-tooltip p {
+    margin: 0.35rem 0;
+}
+
+.quicker-api__key-help-tooltip ul {
+    margin: 0.3rem 0;
+    padding-left: 1.25rem;
+}
+
+.quicker-api__key-help-tooltip pre {
+    margin: 0.45rem 0;
+    padding: 0.55rem 0.65rem;
+    overflow-x: auto;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 75%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, #000 24%, transparent);
+}
+
+.quicker-api__key-help-tooltip code {
+    font-family: var(--monoFontFamily, monospace);
 }
 
 .quicker-api .menu_button,

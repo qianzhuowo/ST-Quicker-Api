@@ -42,6 +42,29 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
         settings().selectedProfileId = compatCustom.id;
         renderProfiles(compatCustom.id);
     `);
+    assert.equal(await run(`document.querySelector('.quicker-api__key-actions').children[0].id`), 'quicker_api_key_help');
+    assert.equal(await run(`document.querySelector('.quicker-api__key-actions').children[2].id`), 'quicker_api_reveal_key');
+    const helpText = await run(`document.getElementById('quicker_api_key_help_tooltip').innerText`);
+    if (scopedHost) {
+        assert.match(helpText, /设置/);
+        assert.match(helpText, /Misc（杂项）/);
+        assert.match(helpText, /Allow Keys Exposure/);
+        assert.match(helpText, /重启 TauriTavern/);
+    } else {
+        assert.match(helpText, /config\.yaml/);
+        assert.match(helpText, /allowKeysExposure: true/);
+        assert.match(helpText, /重启 SillyTavern/);
+    }
+    assert.match(helpText, /点击眼睛查看已保存密钥/);
+    assert.match(helpText, /复制已保存密钥/);
+    assert.equal(await run(`(()=>{document.getElementById('quicker_api_key_help').focus(); return getComputedStyle(document.getElementById('quicker_api_key_help_tooltip')).display;})()`), 'block');
+    await run(`document.getElementById('quicker_api_key_help').blur(); messages.length=0; readBoundSecret(compatCustom)`);
+    const deniedWarning = await run(`messages.find(item=>item.level==='warning')?.message || ''`);
+    if (scopedHost) assert.match(deniedWarning, /TauriTavern.*设置 → Misc（杂项）→ Allow Keys Exposure.*重启 TauriTavern/);
+    else assert.match(deniedWarning, /config\.yaml.*allowKeysExposure.*true.*重启 SillyTavern/);
+    assert.doesNotMatch(deniedWarning, /findSecret/);
+    log('key help is left of reveal and denied plaintext access shows host-specific instructions');
+
     const result = await run('fetchModelsForProfile(compatCustom, compatCustom.endpoint)');
     assert.deepEqual(result.models, ['remote-model']);
     const requests = await run('compatRequests');

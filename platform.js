@@ -201,6 +201,7 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
         cancelSettingsSave, dispose,
         isModelAction: value => typeof openai.isCustomModelActionValue === 'function' && openai.isCustomModelActionValue(value),
         supportsOpenCode: Boolean(openai.chat_completion_sources.OPENCODE && openai.OPENCODE_API_FORMAT),
+        isTauriHost: globalThis.__TAURI_RUNNING__ === true || usesSourceParameters,
         // TT has a native network backend; browser CORS / key exposure are not prerequisites.
         preferBackendModels: usesSourceParameters || globalThis.__TAURI_RUNNING__ === true,
         // This host applies exclusions to the final provider body. Deleting fields
