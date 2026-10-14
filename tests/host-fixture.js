@@ -4,8 +4,8 @@ const extension_settings = fixtureData.extension_settings;
 const oai_settings = fixtureData.oai_settings;
 const openai_settings = Object.values(fixtureData.presets);
 const openai_setting_names = Object.fromEntries(Object.keys(fixtureData.presets).map((name, i) => [name, i]));
-const chat_completion_sources = { CUSTOM: 'custom', CLAUDE: 'claude', MAKERSUITE: 'makersuite' };
-const SECRET_KEYS = { CUSTOM: 'api_key_custom', CLAUDE: 'api_key_claude', MAKERSUITE: 'api_key_makersuite' };
+const chat_completion_sources = { CUSTOM: 'custom', CLAUDE: 'claude', MAKERSUITE: 'makersuite', ...(fixtureData.host === 'tauritavern' ? { OPENCODE: 'opencode' } : {}) };
+const SECRET_KEYS = { CUSTOM: 'api_key_custom', CLAUDE: 'api_key_claude', MAKERSUITE: 'api_key_makersuite', ...(fixtureData.host === 'tauritavern' ? { OPENCODE: 'api_key_opencode' } : {}) };
 const secret_state = Object.fromEntries(Object.values(SECRET_KEYS).map(key => [key, [{ id: 'test-secret', active: true }]]));
 const proxies = [];
 const yaml = { parse: text => JSON.parse(text) }; // Test exclusions use the JSON subset of YAML.
@@ -21,7 +21,7 @@ function fixtureParameters(settings = oai_settings, source, { create = true } = 
     }
     return entry;
 }
-const openaiHost = { oai_settings, chat_completion_sources, ...(scopedHost ? { getAdditionalParametersForSource: fixtureParameters } : {}) };
+const openaiHost = { oai_settings, chat_completion_sources, ...(scopedHost ? { OPENCODE_API_FORMAT: { OPENAI_COMPAT: 'openai_compat' }, isCustomModelActionValue: value => value === '__manage_models__', getAdditionalParametersForSource: fixtureParameters } : {}) };
 const event_types = new Proxy({}, { get: (_, key) => key });
 const eventSource = {
     listeners: new Map(),
@@ -114,6 +114,7 @@ $('#update_oai_preset').on('click', () => {
 $('#custom_model_id').on('input', function () { oai_settings.custom_model = this.value; });
 $('#model_claude_select').on('change', function () { oai_settings.claude_model = this.value; });
 $('#model_google_select').on('change', function () { oai_settings.google_model = this.value; });
+$('#model_opencode_select').on('change', function () { oai_settings.opencode_model = this.value; });
 $('#chat_completion_source').on('change', function () {
     if (scopedHost && this.value.startsWith('custom_')) {
         oai_settings.chat_completion_source = 'custom';
@@ -123,7 +124,7 @@ $('#chat_completion_source').on('change', function () {
         if (scopedHost && this.value === 'custom') oai_settings.custom_api_format = 'openai_compat';
     }
 });
-for (const [id, key] of [['custom_api_url_text', 'custom_url'], ['openai_reverse_proxy', 'reverse_proxy'], ['openai_proxy_password', 'proxy_password']]) {
+for (const [id, key] of [['opencode_endpoint', 'opencode_endpoint'], ['opencode_api_format', 'opencode_api_format'], ['custom_api_url_text', 'custom_url'], ['openai_reverse_proxy', 'reverse_proxy'], ['openai_proxy_password', 'proxy_password']]) {
     $(`#${id}`).val(oai_settings[key] || '').on('input', function () { oai_settings[key] = this.value; });
 }
 function bindFixtureParameterInputs() {
@@ -148,9 +149,10 @@ async function fixtureGenerationData() {
     const parameters = scopedHost ? fixtureParameters() : {
         include_body: oai_settings.custom_include_body, exclude_body: oai_settings.custom_exclude_body, include_headers: oai_settings.custom_include_headers,
     };
-    const modelField = { custom: 'custom_model', claude: 'claude_model', makersuite: 'google_model' }[oai_settings.chat_completion_source];
+    const modelField = { custom: 'custom_model', claude: 'claude_model', makersuite: 'google_model', opencode: 'opencode_model' }[oai_settings.chat_completion_source];
     const data = { chat_completion_source: oai_settings.chat_completion_source,
         custom_api_format: oai_settings.custom_api_format, custom_url: oai_settings.custom_url,
+        opencode_endpoint: oai_settings.opencode_endpoint, opencode_api_format: oai_settings.opencode_api_format,
         reverse_proxy: oai_settings.reverse_proxy, model: oai_settings[modelField], temperature: 0.7, top_p: 0.9, top_k: 40,
         ...((scopedHost || oai_settings.chat_completion_source === 'custom') ? {
             custom_include_body: parameters.include_body, custom_exclude_body: parameters.exclude_body,

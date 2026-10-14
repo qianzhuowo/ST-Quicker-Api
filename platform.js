@@ -9,8 +9,35 @@ const CUSTOM_FORMAT_SELECTIONS = {
     openai_responses: 'custom_openai_responses',
     claude_messages: 'custom_claude_messages',
     gemini_interactions: 'custom_gemini_interactions',
+    gemini_generate_content: 'custom_gemini_generate_content',
 };
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+// Accept only the native service IDs or official base URLs; never silently send
+// an arbitrary URL to OpenCode with an unrelated credential.
+export function normalizeOpenCodeEndpoint(value) {
+    const text = String(value || '').trim();
+    if (!text || text === 'zen') return 'zen';
+    if (text === 'go') return 'go';
+    try {
+        const url = new URL(text);
+        if (url.origin === 'https://opencode.ai' && !url.username && !url.password && !url.search && !url.hash) {
+            const path = url.pathname.replace(/\/+$/, '');
+            if (path === '/zen/v1') return 'zen';
+            if (path === '/zen/go/v1') return 'go';
+        }
+    } catch { /* Report invalid service below. */ }
+    throw new Error('OpenCode 仅支持 zen / go 或官方 https://opencode.ai/zen[/go]/v1 URL。');
+}
+
+export function validateOpenCodeConnection(endpoint, apiFormat) {
+    const service = normalizeOpenCodeEndpoint(endpoint);
+    if (!['openai_compat', 'openai_responses', 'claude_messages', 'gemini'].includes(apiFormat)) {
+        throw new Error('不支持的 OpenCode 请求协议。');
+    }
+    if (service === 'go' && apiFormat === 'gemini') throw new Error('OpenCode Go 不支持 Gemini 请求协议。');
+    return service;
+}
 
 export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }) {
     const native = openai.oai_settings;
@@ -77,7 +104,7 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
         for (const [profileKey, scopedKey, legacyKey] of PARAMETER_FIELDS) {
             // Quicker manages only exclusions for Claude/Gemini. Preserve the
             // host's independent body/headers rather than silently clearing them.
-            if (usesSourceParameters && source !== customSource && profileKey !== 'excludeBody') continue;
+            if (usesSourceParameters && source !== customSource && source !== openai.chat_completion_sources.OPENCODE && profileKey !== 'excludeBody') continue;
             entry[usesSourceParameters ? scopedKey : legacyKey] = String(profile?.[profileKey] || '');
         }
         syncParameterEditors({ emitLegacyInput: true });
@@ -105,13 +132,14 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
     function snapshotConnectionState() {
         rememberParameterEditors();
         const fields = ['chat_completion_source', 'custom_api_format', 'additional_parameters_by_source',
+            'opencode_endpoint', 'opencode_api_format', 'opencode_model',
             ...PARAMETER_FIELDS.map(([, , key]) => key)];
         return structuredClone(Object.fromEntries(fields.filter(key => Object.hasOwn(native, key)).map(key => [key, native[key]])));
     }
 
     function restoreConnectionState(snapshot) {
         rememberParameterEditors();
-        const fields = ['custom_api_format', ...PARAMETER_FIELDS.map(([, , key]) => key)];
+        const fields = ['custom_api_format', 'opencode_endpoint', 'opencode_api_format', 'opencode_model', ...PARAMETER_FIELDS.map(([, , key]) => key)];
         for (const key of fields) {
             if (Object.hasOwn(snapshot, key)) native[key] = snapshot[key];
             else delete native[key];
@@ -137,7 +165,16 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
         native.chat_completion_source = snapshot.chat_completion_source;
         const selection = snapshot.chat_completion_source === customSource
             ? (CUSTOM_FORMAT_SELECTIONS[snapshot.custom_api_format] || customSource) : snapshot.chat_completion_source;
-        if ($) $('#chat_completion_source').val(selection).trigger('change');
+        if ($) {
+            if (Object.hasOwn(snapshot, 'opencode_endpoint')) $('#opencode_endpoint').val(native.opencode_endpoint).trigger('input');
+            if (Object.hasOwn(snapshot, 'opencode_api_format')) $('#opencode_api_format').val(native.opencode_api_format).trigger('input');
+            const model = $('#model_opencode_select');
+            if (native.opencode_model && !model.find('option').filter((_, option) => option.value === native.opencode_model).length) {
+                model.append($('<option>').val(native.opencode_model).text(native.opencode_model));
+            }
+            if (Object.hasOwn(snapshot, 'opencode_model')) model.val(native.opencode_model).trigger('change');
+            $('#chat_completion_source').val(selection).trigger('change');
+        }
         syncParameterEditors({ emitLegacyInput: true });
     }
 
@@ -162,6 +199,10 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
         readAdditionalParameters, writeAdditionalParameters, matchesSource, selectSource, supportsCustomConnection,
         snapshotConnectionState, restoreConnectionState, rememberParameterEditors, syncParameterEditors,
         cancelSettingsSave, dispose,
+        isModelAction: value => typeof openai.isCustomModelActionValue === 'function' && openai.isCustomModelActionValue(value),
+        supportsOpenCode: Boolean(openai.chat_completion_sources.OPENCODE && openai.OPENCODE_API_FORMAT),
+        // TT has a native network backend; browser CORS / key exposure are not prerequisites.
+        preferBackendModels: usesSourceParameters || globalThis.__TAURI_RUNNING__ === true,
         // This host applies exclusions to the final provider body. Deleting fields
         // from its transport envelope early can remove routing/validation inputs.
         handlesRequestExclusions: usesSourceParameters,

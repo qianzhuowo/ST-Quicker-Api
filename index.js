@@ -7,13 +7,13 @@ import { eventSource, event_types, getRequestHeaders, saveSettings, saveSettings
 import { yaml } from '../../../../lib.js';
 import * as openaiHost from '../../../openai.js';
 import * as settingsHost from '../../../../script.js';
-import { createPlatformAdapter, inspectSettingsSave } from './platform.js';
+import { createPlatformAdapter, inspectSettingsSave, normalizeOpenCodeEndpoint, validateOpenCodeConnection } from './platform.js';
 
 const platform = createPlatformAdapter({ openai: openaiHost, settingsApi: settingsHost, cancelDebounce, $: (...args) => $(...args) });
 
 const MODULE_NAME = 'quickerApi';
 const LEGACY_MODULE_NAME = 'customOpenAIProfiles';
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 const PANEL_COLLAPSED_STORAGE_KEY = 'quickerApi.panelCollapsed';
 const EMPTY_SECRET_LABEL = 'Quicker Api · No key';
 const BUILTIN_QUICK_URLS = Object.freeze([
@@ -36,6 +36,7 @@ const SUPPORTED_SOURCES = new Set([
     chat_completion_sources.CUSTOM,
     chat_completion_sources.CLAUDE,
     chat_completion_sources.MAKERSUITE,
+    ...(platform.supportsOpenCode ? [chat_completion_sources.OPENCODE] : []),
 ]);
 const FORMATS = Object.freeze({
     openai: {
@@ -57,6 +58,18 @@ const FORMATS = Object.freeze({
         modelInput: '#model_claude_select',
         endpointField: 'reverse_proxy',
         endpointInput: '#openai_reverse_proxy',
+    },
+    // Preserve stored OpenCode profiles even on hosts without this capability;
+    // never reinterpret them as Custom profiles with a different credential slot.
+    opencode: {
+        label: 'OpenCode (Zen / Go)',
+        source: chat_completion_sources.OPENCODE || 'opencode',
+        secretKey: SECRET_KEYS.OPENCODE || 'api_key_opencode',
+        keyInput: '#api_key_opencode',
+        modelField: 'opencode_model',
+        modelInput: '#model_opencode_select',
+        endpointField: 'opencode_endpoint',
+        endpointInput: '#opencode_endpoint',
     },
     gemini: {
         label: 'Gemini',
@@ -209,6 +222,32 @@ function makeId(prefix = 'profile') {
         : `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function hasManagedModels(format) {
+    return format === 'openai' || format === 'opencode';
+}
+
+function usesProxyProfile(format, endpoint) {
+    return (format === 'anthropic' || format === 'gemini') && Boolean(endpoint);
+}
+
+function nativeEndpoint(format) {
+    const value = String(oai_settings[FORMATS[format].endpointField] || '');
+    return format === 'opencode' ? normalizeOpenCodeEndpoint(value) : value;
+}
+
+function editorEndpoint(format) {
+    const value = normalizeText($('#quicker_api_url').val());
+    return format === 'opencode' ? validateOpenCodeConnection(value, String($('#quicker_api_opencode_format').val())) : value;
+}
+
+function renderOpenCodeFields(profile, format) {
+    if (format === 'opencode') $('#quicker_api_format option[value="opencode"]').prop('disabled', !platform.supportsOpenCode);
+    $('#quicker_api_opencode_fields').toggle(format === 'opencode');
+    $('#quicker_api_opencode_format').val(profile?.opencodeApiFormat || oai_settings.opencode_api_format || 'openai_compat');
+    $('#quicker_api_url').attr('type', format === 'opencode' ? 'text' : 'url')
+        .attr('placeholder', format === 'opencode' ? 'zen / go 或官方 OpenCode URL' : 'Custom 必填；Anthropic / Gemini 留空使用官方端点');
+}
+
 function normalizeFormat(value) {
     return Object.hasOwn(FORMATS, value) ? value : 'openai';
 }
@@ -284,25 +323,26 @@ function normalizeQuickUrl(raw) {
 function normalizeProfile(raw) {
     const format = normalizeFormat(raw?.format);
     const model = String(raw?.model || '').slice(0, 500);
-    const availableModels = format === 'openai' ? normalizeModelList(raw?.availableModels) : [];
+    const availableModels = hasManagedModels(format) ? normalizeModelList(raw?.availableModels) : [];
     if (model && !availableModels.includes(model)) availableModels.unshift(model);
     return {
         id: normalizeText(raw?.id) || makeId(),
         name: sanitizeName(raw?.name) || 'API Profile',
         format,
-        endpoint: String(raw?.endpoint || '').slice(0, 2048),
+        endpoint: String(raw?.endpoint || (format === 'opencode' ? 'zen' : '')).slice(0, 2048),
+        opencodeApiFormat: format === 'opencode' ? String(raw?.opencodeApiFormat || 'openai_compat') : '',
         model,
         availableModels,
-        fetchedModels: format === 'openai' ? normalizeModelList(raw?.fetchedModels) : [],
-        customized: format === 'openai'
+        fetchedModels: hasManagedModels(format) ? normalizeModelList(raw?.fetchedModels) : [],
+        customized: hasManagedModels(format)
             ? (Object.hasOwn(raw || {}, 'customized') ? Boolean(raw?.customized) : Boolean(raw?.fetchedModels?.length))
             : false,
-        fetchedFromEndpoint: format === 'openai'
+        fetchedFromEndpoint: hasManagedModels(format)
             ? String(raw?.fetchedFromEndpoint || (raw?.fetchedModels?.length ? raw?.endpoint : '') || '').slice(0, 2048)
             : '',
-        includeBody: format === 'openai' ? String(raw?.includeBody || '').slice(0, 100000) : '',
+        includeBody: hasManagedModels(format) ? String(raw?.includeBody || '').slice(0, 100000) : '',
         excludeBody: String(raw?.excludeBody || '').slice(0, 100000),
-        includeHeaders: format === 'openai' ? String(raw?.includeHeaders || '').slice(0, 100000) : '',
+        includeHeaders: hasManagedModels(format) ? String(raw?.includeHeaders || '').slice(0, 100000) : '',
         secretId: String(raw?.secretId || ''),
         proxyPreset: String(raw?.proxyPreset || ''),
         needsSecret: Boolean(raw?.needsSecret),
@@ -417,7 +457,7 @@ function initializeSettings() {
 }
 
 function toolbarHtml() {
-    const formatOptions = Object.entries(FORMATS).map(([value, config]) => `<option value="${value}">${config.label}</option>`).join('');
+    const formatOptions = Object.entries(FORMATS).filter(([format]) => format !== 'opencode' || platform.supportsOpenCode).map(([value, config]) => `<option value="${value}">${config.label}</option>`).join('');
     return `
         <section id="quicker_api" class="quicker-api">
             <div class="quicker-api__title">
@@ -450,6 +490,15 @@ function toolbarHtml() {
                     <input id="quicker_api_url" class="text_pole" type="url" autocomplete="off" placeholder="Custom 必填；Anthropic / Gemini 留空使用官方端点" />
                     <button id="quicker_api_quick_url" class="menu_button quicker-api__text-button" type="button" title="从常用端点中快捷填入 URL" aria-label="快捷 URL" aria-haspopup="menu" aria-expanded="false"><i class="fa-solid fa-link"></i><span class="quicker-api__desktop-label">快捷 URL</span><i class="fa-solid fa-caret-down quicker-api__desktop-label"></i></button>
                 </div>
+            </div>
+            <div id="quicker_api_opencode_fields" class="quicker-api__field" style="display:none">
+                <label for="quicker_api_opencode_format">OpenCode 协议</label>
+                <select id="quicker_api_opencode_format" class="text_pole">
+                    <option value="openai_compat">OpenAI Chat Completions</option>
+                    <option value="openai_responses">OpenAI Responses</option>
+                    <option value="claude_messages">Anthropic Messages</option>
+                    <option value="gemini">Gemini（仅 Zen）</option>
+                </select>
             </div>
             <div class="quicker-api__field quicker-api__key-field">
                 <label for="quicker_api_key_input">Key / Password</label>
@@ -559,7 +608,7 @@ function clearKeyEditor(placeholder = '未配置密钥') {
 
 function profileHasCredential(profile, format, endpoint) {
     if (!profile) return false;
-    if (format !== 'openai' && endpoint) return Boolean(getBoundProxyPreset(profile)?.password);
+    if (usesProxyProfile(format, endpoint)) return Boolean(getBoundProxyPreset(profile)?.password);
     const config = FORMATS[format];
     return Boolean(profile.secretId
         && !profile.needsSecret
@@ -571,7 +620,7 @@ function updateCredentialEditor(profile = selectedProfile()) {
     const format = profile?.format || normalizeFormat($('#quicker_api_format').val());
     const config = FORMATS[format];
     const endpoint = profile?.endpoint ?? normalizeText($('#quicker_api_url').val());
-    const proxyMode = format !== 'openai' && Boolean(endpoint);
+    const proxyMode = usesProxyProfile(format, endpoint);
     const hasCredential = profileHasCredential(profile, format, endpoint);
     const placeholder = proxyMode
         ? (hasCredential ? '已配置代理密码（点击眼睛查看）' : '未配置代理密码')
@@ -581,7 +630,7 @@ function updateCredentialEditor(profile = selectedProfile()) {
 }
 
 function getEditorModel(format = normalizeFormat($('#quicker_api_format').val())) {
-    if (format === 'openai') return normalizeText($('#quicker_api_custom_model').val());
+    if (hasManagedModels(format)) return normalizeText($('#quicker_api_custom_model').val());
     return normalizeText($('#quicker_api_provider_model').val());
 }
 
@@ -589,6 +638,7 @@ function syncEditorModelToNative() {
     const format = normalizeFormat($('#quicker_api_format').val());
     const config = FORMATS[format];
     const model = getEditorModel(format);
+    if (platform.isModelAction(model)) return;
     syncingEditorModel = true;
     try {
         oai_settings[config.modelField] = model;
@@ -614,7 +664,11 @@ function handleNativeModelChange() {
 function syncEditorConnectionToNative() {
     const format = normalizeFormat($('#quicker_api_format').val());
     const config = FORMATS[format];
-    const endpoint = normalizeText($('#quicker_api_url').val());
+    const endpoint = editorEndpoint(format);
+    if (format === 'opencode') {
+        oai_settings.opencode_api_format = String($('#quicker_api_opencode_format').val());
+        $('#opencode_api_format').val(oai_settings.opencode_api_format).trigger('input');
+    }
     oai_settings[config.endpointField] = endpoint;
     $(config.endpointInput).val(endpoint).trigger('input');
     syncEditorModelToNative();
@@ -631,10 +685,12 @@ function applyNativeAdditionalParameters(profile) {
 function renderModelControl(profile = selectedProfile(), modelOverride = null) {
     const format = normalizeFormat($('#quicker_api_format').val());
     const root = $('#quicker_api_model_control').empty();
-    if (format !== 'openai') {
+    if (!hasManagedModels(format)) {
         const nativeSelect = $(FORMATS[format].modelInput);
         const draftSelect = $('<select id="quicker_api_provider_model" class="text_pole flex1" aria-label="Provider 模型">');
-        nativeSelect.find('option').each((_, option) => draftSelect.append($(option).clone()));
+        nativeSelect.find('option').each((_, option) => {
+            if (!platform.isModelAction(option.value)) draftSelect.append($(option).clone());
+        });
         const providerModel = normalizeText(modelOverride ?? profile?.model ?? oai_settings[FORMATS[format].modelField]);
         if (!draftSelect.find('option').filter((_, option) => option.value === providerModel).length) {
             draftSelect.append($('<option>').val(providerModel).text(providerModel || '— 选择模型 —'));
@@ -647,7 +703,7 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
         renderPanelSummary();
         return;
     }
-    const current = normalizeText(modelOverride ?? profile?.model ?? oai_settings.custom_model);
+    const current = normalizeText(modelOverride ?? profile?.model ?? oai_settings[FORMATS[format].modelField]);
     const models = normalizeModelList([...(profile?.availableModels || []), current]);
     const select = $('<select id="quicker_api_custom_model" class="text_pole flex1" aria-label="Custom 模型">')
         .append($('<option>').val('').text('— 选择模型 —'));
@@ -666,7 +722,8 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
 function renderProfileEditor(profile = selectedProfile(), modelOverride = null) {
     const format = profile?.format || normalizeFormat($('#quicker_api_format').val());
     $('#quicker_api_format').val(format);
-    $('#quicker_api_url').val(profile?.endpoint ?? String(oai_settings[FORMATS[format].endpointField] || ''));
+    $('#quicker_api_url').val(profile?.endpoint ?? nativeEndpoint(format));
+    renderOpenCodeFields(profile, format);
     renderModelControl(profile, modelOverride);
     editorModelBaseline = getEditorModel(format);
 }
@@ -674,6 +731,9 @@ function renderProfileEditor(profile = selectedProfile(), modelOverride = null) 
 function renderProfiles(preferredId = null) {
     const select = $('#quicker_api_profile_select').empty().append($('<option>').val('').text('— 选择 API Profile —'));
     for (const profile of [...profiles()].sort((a, b) => a.name.localeCompare(b.name))) {
+        if (profile.format === 'opencode' && !platform.supportsOpenCode && !$('#quicker_api_format option[value="opencode"]').length) {
+            $('#quicker_api_format').append($('<option disabled>').val('opencode').text('OpenCode（当前宿主不支持）'));
+        }
         select.append($('<option>').val(profile.id).text(`[${FORMATS[profile.format].label}] ${profile.name}`));
     }
     const selectedId = preferredId ?? settings().selectedProfileId ?? '';
@@ -692,14 +752,15 @@ function profileMatchesNative(profile) {
     const config = FORMATS[profile.format];
     if (!platform.matchesSource(config.source)) return false;
     if (String(oai_settings[config.modelField] || '') !== profile.model) return false;
-    if (String(oai_settings[config.endpointField] || '') !== profile.endpoint) return false;
-    if (profile.format !== 'openai' && profile.endpoint) {
+    if (nativeEndpoint(profile.format) !== profile.endpoint) return false;
+    if (profile.format === 'opencode' && oai_settings.opencode_api_format !== profile.opencodeApiFormat) return false;
+    if (usesProxyProfile(profile.format, profile.endpoint)) {
         const proxyPreset = getBoundProxyPreset(profile);
         if (!proxyPreset || String(oai_settings.proxy_password || '') !== String(proxyPreset.password || '')) return false;
     }
     const additional = nativeAdditionalParameters();
     if (additional.excludeBody !== profile.excludeBody) return false;
-    return profile.format !== 'openai'
+    return !hasManagedModels(profile.format)
         || (additional.includeBody === profile.includeBody
             && additional.includeHeaders === profile.includeHeaders);
 }
@@ -713,9 +774,10 @@ function editorHasUnsavedChanges(profile) {
     const additional = nativeAdditionalParameters();
     return normalizeFormat($('#quicker_api_format').val()) !== profile.format
         || normalizeText($('#quicker_api_url').val()) !== normalizeText(profile.endpoint)
+        || (profile.format === 'opencode' && $('#quicker_api_opencode_format').val() !== profile.opencodeApiFormat)
         || getEditorModel() !== editorModelBaseline
         || additional.excludeBody !== profile.excludeBody
-        || (profile.format === 'openai' && (additional.includeBody !== profile.includeBody
+        || (hasManagedModels(profile.format) && (additional.includeBody !== profile.includeBody
             || additional.includeHeaders !== profile.includeHeaders))
         || (keyEditorDirty && Boolean(normalizeText($('#quicker_api_key_input').val())));
 }
@@ -725,7 +787,8 @@ function renderStatus(extraMessage = '') {
     const profile = selectedProfile();
     const presetName = currentPresetName();
     if (profile) {
-        const proxyMode = profile.format !== 'openai' && Boolean(profile.endpoint);
+        if (profile.format === 'opencode' && !platform.supportsOpenCode) return setStatus('当前宿主不支持原生 OpenCode；配置已保留但不能应用。', 'warning');
+        const proxyMode = usesProxyProfile(profile.format, profile.endpoint);
         const blockedMessage = proxyMode ? '' : getBlockedSecretMessage(FORMATS[profile.format].secretKey);
         if (blockedMessage) return setStatus('安全阻断：凭据状态无法确认。', 'warning');
         if (settings().activeProfileId !== profile.id) return setStatus(extraMessage || '所选 Profile 未应用。', 'warning');
@@ -772,7 +835,8 @@ function endPresetTransition({ force = false } = {}) {
 function requestMatchesProfile(profile, generateData) {
     if (!profile || !platform.matchesSource(FORMATS[profile.format].source, generateData)) return false;
     if (String(generateData.model || '') !== profile.model) return false;
-    const endpointField = profile.format === 'openai' ? 'custom_url' : 'reverse_proxy';
+    const endpointField = FORMATS[profile.format].endpointField;
+    if (profile.format === 'opencode' && generateData.opencode_api_format !== profile.opencodeApiFormat) return false;
     return normalizeText(generateData[endpointField]) === normalizeText(profile.endpoint);
 }
 
@@ -802,7 +866,7 @@ function guardGenerationWhenBlocked(generateData) {
     }
     const format = Object.values(FORMATS).find(config => config.source === generateData.chat_completion_source);
     if (!format) return;
-    const usesProxyCredential = format.source !== chat_completion_sources.CUSTOM && Boolean(generateData.reverse_proxy);
+    const usesProxyCredential = [chat_completion_sources.CLAUDE, chat_completion_sources.MAKERSUITE].includes(format.source) && Boolean(generateData.reverse_proxy);
     const blockedMessage = settings().blockedSecretKeys[format.secretKey];
     if (!usesProxyCredential && blockedMessage) {
         generateData.chat_completion_source = 'quicker_api_safety_blocked';
@@ -979,14 +1043,23 @@ async function rollbackOrFailClosed(config, previousSecretId, nativeSnapshot, me
 
 function applyNativeFields(profile, proxyPassword = '', applyModel = true) {
     const config = FORMATS[profile.format];
+    if (profile.format === 'opencode') {
+        validateOpenCodeConnection(profile.endpoint, profile.opencodeApiFormat);
+        oai_settings.opencode_api_format = profile.opencodeApiFormat;
+        $('#opencode_api_format').val(profile.opencodeApiFormat).trigger('input');
+    }
     oai_settings[config.endpointField] = profile.endpoint;
     $(config.endpointInput).val(profile.endpoint).trigger('input');
     if (applyModel) {
         oai_settings[config.modelField] = profile.model;
-        $(config.modelInput).val(profile.model).trigger(profile.format === 'openai' ? 'input' : 'change');
+        if (profile.model) {
+            if (!applyExplicitModel(profile.model, profile.format)) throw new Error('无法应用 Profile 模型，请检查模型 ID。');
+        } else {
+            $(config.modelInput).val('').trigger(profile.format === 'openai' ? 'input' : 'change');
+        }
     }
     applyNativeAdditionalParameters(profile);
-    if (profile.format !== 'openai') {
+    if (profile.format === 'anthropic' || profile.format === 'gemini') {
         oai_settings.proxy_password = proxyPassword;
         $('#openai_proxy_password').val(proxyPassword).trigger('input');
     }
@@ -1034,10 +1107,14 @@ function ensureBoundProxyPreset(profileName, endpoint, password, existingName = 
 
 async function applyProfile(profile, expectedGeneration = profileSelectionGeneration, keepPresetTransition = false, applyModel = true) {
     if (!profile || extensionDisabled || expectedGeneration !== profileSelectionGeneration) return false;
+    if (profile.format === 'opencode') {
+        if (!platform.supportsOpenCode) { toastr.warning('当前宿主不支持原生 OpenCode；配置已保留但不能应用。'); return false; }
+        validateOpenCodeConnection(profile.endpoint, profile.opencodeApiFormat);
+    }
     const config = FORMATS[profile.format];
     const previousSelection = settings().activeProfileId;
     const nativeSnapshot = snapshotNative();
-    const proxyMode = profile.format !== 'openai' && Boolean(profile.endpoint);
+    const proxyMode = usesProxyProfile(profile.format, profile.endpoint);
     if (proxyMode) {
         const proxyPreset = getBoundProxyPreset(profile);
         if (!proxyPreset || normalizeText(proxyPreset.url) !== normalizeText(profile.endpoint)) {
@@ -1138,8 +1215,8 @@ function captureNativeProfile(name, format, existing = {}) {
     const normalizedFormat = normalizeFormat(format);
     const config = FORMATS[normalizedFormat];
     const additional = nativeAdditionalParameters(config.source);
-    const endpoint = String(oai_settings[config.endpointField] || '');
-    const proxyMode = normalizedFormat !== 'openai' && Boolean(endpoint);
+    const endpoint = nativeEndpoint(normalizedFormat);
+    const proxyMode = usesProxyProfile(normalizedFormat, endpoint);
     const activeSecret = getActiveSecret(config.secretKey);
     const retainedSecretId = existing.format === normalizedFormat ? String(existing.secretId || '') : '';
     const secretId = proxyMode ? '' : (retainedSecretId || activeSecret?.id || '');
@@ -1154,11 +1231,12 @@ function captureNativeProfile(name, format, existing = {}) {
         id: profileId,
         name: uniqueName(profileName, existing.id),
         format: normalizedFormat,
+        opencodeApiFormat: normalizedFormat === 'opencode' ? oai_settings.opencode_api_format : '',
         endpoint,
         model: getEditorModel(normalizedFormat),
-        includeBody: normalizedFormat === 'openai' ? additional.includeBody : '',
+        includeBody: hasManagedModels(normalizedFormat) ? additional.includeBody : '',
         excludeBody: additional.excludeBody,
-        includeHeaders: normalizedFormat === 'openai' ? additional.includeHeaders : '',
+        includeHeaders: hasManagedModels(normalizedFormat) ? additional.includeHeaders : '',
         secretId,
         proxyPreset,
         needsSecret,
@@ -1334,8 +1412,9 @@ function createProfile() {
     $('#quicker_api_url').trigger('focus');
 }
 
-function importIdentity(format, endpoint, credentialIdentity) {
-    return `${format}|${normalizeText(endpoint).toLocaleLowerCase()}|${credentialIdentity}`;
+function importIdentity(format, endpoint, credentialIdentity, apiFormat = '') {
+    const protocol = format === 'opencode' ? `|${apiFormat || 'openai_compat'}` : '';
+    return `${format}${protocol}|${normalizeText(endpoint).toLocaleLowerCase()}|${credentialIdentity}`;
 }
 
 function nativeImportFingerprint(candidate, format, endpoint) {
@@ -1343,7 +1422,8 @@ function nativeImportFingerprint(candidate, format, endpoint) {
     const credentialRef = candidate.sourceSecretKey && candidate.sourceSecretId
         ? `secret:${candidate.sourceSecretKey}:${candidate.sourceSecretId}`
         : (candidate.proxyPreset ? `proxy:${normalizeText(candidate.proxyPreset).toLocaleLowerCase()}` : 'no-source-credential');
-    return `${sourceRef}|${format}|${normalizeText(endpoint).toLocaleLowerCase()}|${credentialRef}`.slice(0, 5000);
+    const protocol = format === 'opencode' ? `|${candidate.opencodeApiFormat || 'openai_compat'}` : '';
+    return `${sourceRef}|${format}${protocol}|${normalizeText(endpoint).toLocaleLowerCase()}|${credentialRef}`.slice(0, 5000);
 }
 
 async function credentialDescriptor(secretKey = '', secretId = '', plainValue = '') {
@@ -1370,12 +1450,12 @@ async function collectNativeImportCandidates(authoritative) {
             name: sanitizeName(candidate.name) || '原生连接配置',
             endpoint,
             model: normalizeText(candidate.model),
-            includeBody: format === 'openai' ? String(candidate.includeBody || '') : '',
-            excludeBody: format === 'openai' ? String(candidate.excludeBody || '') : '',
-            includeHeaders: format === 'openai' ? String(candidate.includeHeaders || '') : '',
+            includeBody: hasManagedModels(format) ? String(candidate.includeBody || '') : '',
+            excludeBody: hasManagedModels(format) ? String(candidate.excludeBody || '') : '',
+            includeHeaders: hasManagedModels(format) ? String(candidate.includeHeaders || '') : '',
             sourceSecretId: String(candidate.sourceSecretId || ''),
             credential,
-            identity: importIdentity(format, endpoint, credential.identity),
+            identity: importIdentity(format, endpoint, credential.identity, candidate.opencodeApiFormat),
             fingerprint: nativeImportFingerprint(candidate, format, endpoint),
         };
         if (!candidates.some(item => item.identity === normalized.identity)) candidates.push(normalized);
@@ -1390,6 +1470,16 @@ async function collectNativeImportCandidates(authoritative) {
             model: oai_settings.custom_model, sourceSecretKey: SECRET_KEYS.CUSTOM,
             sourceSecretId: activeCustom?.id,
             ...nativeAdditionalParameters(chat_completion_sources.CUSTOM),
+        });
+    }
+
+    if (platform.supportsOpenCode && oai_settings.chat_completion_source === chat_completion_sources.OPENCODE) {
+        await add({
+            sourceRef: 'current-opencode', sourceLabel: '当前 OpenCode', name: '当前 OpenCode 配置', format: 'opencode',
+            endpoint: nativeEndpoint('opencode'), opencodeApiFormat: oai_settings.opencode_api_format || 'openai_compat',
+            model: oai_settings.opencode_model, sourceSecretKey: SECRET_KEYS.OPENCODE,
+            sourceSecretId: authoritative[SECRET_KEYS.OPENCODE]?.find(entry => entry.active)?.id,
+            ...nativeAdditionalParameters(chat_completion_sources.OPENCODE),
         });
     }
 
@@ -1413,12 +1503,13 @@ async function collectNativeImportCandidates(authoritative) {
     for (const nativeProfile of managerProfiles) {
         const format = sourceFormats[nativeProfile?.api];
         if (!format) continue;
+        if (nativeProfile.api === 'custom' && !platform.supportsCustomConnection({ custom_api_format: nativeProfile['custom-api-format'] })) continue;
         const config = FORMATS[format];
         const proxy = nativeProfile.proxy ? proxies.find(item => item.name === nativeProfile.proxy) : null;
         const endpoint = format === 'openai'
             ? normalizeText(proxy?.url || nativeProfile['api-url'] || 'https://api.openai.com/v1')
             : normalizeText(proxy?.url || nativeProfile['api-url']);
-        const proxyMode = format !== 'openai' && Boolean(endpoint);
+        const proxyMode = usesProxyProfile(format, endpoint);
         const usesProxyCredential = Boolean(proxy?.url);
         await add({
             sourceRef: `connection-manager:${normalizeText(nativeProfile.id || nativeProfile.name)}`,
@@ -1445,14 +1536,14 @@ async function collectNativeImportCandidates(authoritative) {
     const existing = new Set();
     const existingFingerprints = new Set(profiles().map(profile => normalizeText(profile.nativeImportFingerprint)).filter(Boolean));
     for (const profile of profiles()) {
-        const proxyMode = profile.format !== 'openai' && Boolean(profile.endpoint);
+        const proxyMode = usesProxyProfile(profile.format, profile.endpoint);
         const proxy = proxyMode ? getBoundProxyPreset(profile) : null;
         const credential = await credentialDescriptor(
             proxyMode ? '' : FORMATS[profile.format].secretKey,
             proxyMode ? '' : profile.secretId,
             proxyMode ? proxy?.password : '',
         );
-        existing.add(importIdentity(profile.format, profile.endpoint, credential.identity));
+        existing.add(importIdentity(profile.format, profile.endpoint, credential.identity, profile.opencodeApiFormat));
     }
     return candidates.filter(candidate => !existing.has(candidate.identity) && !existingFingerprints.has(candidate.fingerprint));
 }
@@ -1472,7 +1563,7 @@ function buildNativeImportPreview(candidates) {
 
 async function resolveNativeImportCredential(candidate, authoritative) {
     const targetKey = FORMATS[candidate.format].secretKey;
-    if (candidate.proxyPreset && candidate.format !== 'openai') {
+    if (usesProxyProfile(candidate.format, candidate.endpoint) && candidate.proxyPreset) {
         return { secretId: '', proxyPreset: candidate.proxyPreset, needsSecret: !candidate.credential.value, exposureDenied: false };
     }
     if (candidate.sourceSecretKey === targetKey && candidate.sourceSecretId
@@ -1521,7 +1612,8 @@ async function importNativeProfile() {
                 secretId: credential.secretId, proxyPreset: credential.proxyPreset,
                 needsSecret: credential.needsSecret,
                 nativeImportFingerprint: candidate.fingerprint,
-                availableModels: candidate.format === 'openai' ? [candidate.model] : [],
+                opencodeApiFormat: candidate.opencodeApiFormat,
+                availableModels: hasManagedModels(candidate.format) ? [candidate.model] : [],
                 updatedAt: new Date().toISOString(),
             }));
             imported++;
@@ -1543,8 +1635,10 @@ async function saveSelectedProfile() {
     const isNew = !current;
     const previousEndpoint = normalizeText(current?.endpoint);
     const format = normalizeFormat($('#quicker_api_format').val());
-    const editorEndpoint = normalizeText($('#quicker_api_url').val());
-    if (format === 'openai' && !editorEndpoint) {
+    if (format === 'opencode' && !platform.supportsOpenCode) return toastr.warning('当前宿主不支持原生 OpenCode。');
+    let editorUrl;
+    try { editorUrl = editorEndpoint(format); } catch (error) { toastr.warning(error.message); return; }
+    if (format === 'openai' && !editorUrl) {
         toastr.warning('OpenAI Compatible URL 不能为空。');
         return;
     }
@@ -1554,7 +1648,7 @@ async function saveSelectedProfile() {
         current = normalizeProfile({ id: makeId(), name: uniqueName(name), format });
     }
     const config = FORMATS[format];
-    const proxyMode = format !== 'openai' && Boolean(editorEndpoint);
+    const proxyMode = usesProxyProfile(format, editorUrl);
     if (!proxyMode && !await readAuthoritativeSecretState()) {
         toastr.error('无法读取权威密钥状态，已取消保存 API 配置。');
         return;
@@ -1563,12 +1657,13 @@ async function saveSelectedProfile() {
     let captureBase = current;
     if (keyValue) {
         const credentialDraft = normalizeProfile({ ...structuredClone(current), format });
-        if (!await saveAndBindInputKey(credentialDraft, format, editorEndpoint)) return;
+        if (!await saveAndBindInputKey(credentialDraft, format, editorUrl)) return;
         captureBase = credentialDraft;
     }
     syncEditorConnectionToNative();
+    $('#quicker_api_url').val(editorUrl);
     Object.assign(current, captureNativeProfile(current.name, format, captureBase));
-    if (format === 'openai') {
+    if (hasManagedModels(format)) {
         current.availableModels = normalizeModelList([...(current.availableModels || []), current.model]);
         if (!isNew && previousEndpoint !== normalizeText(current.endpoint)) {
             current.fetchedModels = [];
@@ -1634,6 +1729,7 @@ async function deleteSelectedProfile() {
 
 
 async function findMatchingSecret(key, value) {
+    if (!await canReadSecretPlaintext()) return { entry: null, exposureAvailable: false };
     let readable = false;
     for (const entry of getSecretEntries(key)) {
         const existing = await findSecretBounded(key, entry.id);
@@ -1667,7 +1763,7 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
     const config = FORMATS[format];
     const endpoint = endpointOverride === null ? String(oai_settings[config.endpointField] || '') : String(endpointOverride || '');
     const value = normalizeText($('#quicker_api_key_input').val() || $(config.keyInput).val());
-    if (format !== 'openai' && endpoint) {
+    if (usesProxyProfile(format, endpoint)) {
         if (!value) return true;
         profile.proxyPreset = ensureBoundProxyPreset(profile.name, endpoint, value, profile.proxyPreset, profile.id);
         profile.secretId = '';
@@ -1701,7 +1797,7 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
 }
 
 async function readBoundSecret(profile) {
-    if (profile?.format !== 'openai' && profile?.endpoint) {
+    if (usesProxyProfile(profile?.format, profile?.endpoint)) {
         const proxyPreset = getBoundProxyPreset(profile);
         if (!proxyPreset) {
             toastr.warning('当前 Profile 没有可用的原生 Reverse Proxy Preset。');
@@ -1755,8 +1851,8 @@ async function copyBoundSecret() {
 
 async function addCustomModel() {
     const profile = selectedProfile();
-    if (!profile || profile.format !== 'openai') return toastr.info('请先选择并保存 OpenAI Compatible 配置。');
-    const model = await promptName('输入 Custom 模型 ID：', getEditorModel('openai'));
+    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 OpenAI Compatible / OpenCode 配置。');
+    const model = await promptName('输入 Custom 模型 ID：', getEditorModel(profile.format));
     if (!model) return;
     profile.availableModels = normalizeModelList([...(profile.availableModels || []), model]);
     profile.customized = true;
@@ -1783,13 +1879,9 @@ function buildModelsEndpoint(endpoint) {
 
 function customHeaderObject(value) {
     if (!normalizeText(value)) return {};
-    try {
-        const parsed = JSON.parse(value);
-        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return {};
-        return Object.fromEntries(Object.entries(parsed).filter(([key, item]) => key && typeof item === 'string'));
-    } catch {
-        return {};
-    }
+    const parsed = yaml.parse(value);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('附加请求头必须是 YAML / JSON 对象。');
+    return Object.fromEntries(Object.entries(parsed).filter(([key, item]) => key && item != null).map(([key, item]) => [key, String(item)]));
 }
 
 async function fetchWithTimeout(resource, options, timeout = 15000, consumeResponse = null) {
@@ -1812,8 +1904,20 @@ async function fetchJsonWithTimeout(resource, options, timeout = 15000) {
     }));
 }
 
+async function canReadSecretPlaintext() {
+    // Older SillyTavern releases do not expose this endpoint. Keep their existing
+    // find semantics; TT must preflight to avoid native permission-error toasts.
+    if (!platform.preferBackendModels) return true;
+    try {
+        const { response, data } = await fetchJsonWithTimeout('/api/secrets/settings', {
+            method: 'POST', headers: getRequestHeaders(),
+        });
+        return response.ok && data?.allowKeysExposure === true;
+    } catch { return false; }
+}
+
 async function findSecretBounded(key, id) {
-    if (extensionDisabled || teardownPending) return null;
+    if (extensionDisabled || teardownPending || !await canReadSecretPlaintext()) return null;
     try {
         const { response, data } = await fetchJsonWithTimeout('/api/secrets/find', {
             method: 'POST',
@@ -1829,9 +1933,15 @@ async function findSecretBounded(key, id) {
 }
 
 async function fetchModelsForProfile(profile, endpoint) {
+    if (profile.format === 'opencode') {
+        if (!platform.supportsOpenCode) throw new Error('当前宿主不支持原生 OpenCode。');
+        validateOpenCodeConnection(endpoint, profile.opencodeApiFormat);
+    }
+    const config = FORMATS[profile.format];
+    const backendOnly = platform.preferBackendModels || profile.format === 'opencode';
     let frontendError = null;
-    try {
-        const key = profile.secretId ? await findSecretBounded(SECRET_KEYS.CUSTOM, profile.secretId) : '';
+    if (!backendOnly) try {
+        const key = profile.secretId ? await findSecretBounded(config.secretKey, profile.secretId) : '';
         if (profile.secretId && key === null) throw new Error('浏览器无权读取已保存 Key');
         const headers = { Accept: 'application/json', ...customHeaderObject(profile.includeHeaders) };
         if (key && !Object.keys(headers).some(name => name.toLowerCase() === 'authorization')) headers.Authorization = `Bearer ${key}`;
@@ -1847,11 +1957,16 @@ async function fetchModelsForProfile(profile, endpoint) {
 
     let previousActiveId = '';
     let desiredSecretId = '';
+    // Model probes temporarily rotate the host's global credential slot. Block
+    // generation for the whole transaction, not just the asynchronous rotation.
+    const transitionWasBlocked = presetTransitionBlocked;
+    beginPresetTransition();
     try {
         const authoritative = await readAuthoritativeSecretState();
-        if (!authoritative) throw new Error('无法读取 Custom 密钥权威状态');
-        const customEntries = Array.isArray(authoritative[SECRET_KEYS.CUSTOM]) ? authoritative[SECRET_KEYS.CUSTOM] : [];
-        previousActiveId = customEntries.find(entry => entry.active)?.id || '';
+        if (!authoritative) throw new Error(`无法读取 ${config.label} 密钥权威状态`);
+        const customEntries = Array.isArray(authoritative[config.secretKey]) ? authoritative[config.secretKey] : [];
+        previousActiveId = customEntries.find(entry => entry.active)?.id || await ensureEmptySecret(config.secretKey);
+        if (!previousActiveId) throw new Error('无法建立模型获取前的安全凭据基线');
         const boundSecretExists = Boolean(profile.secretId && customEntries.some(entry => entry.id === profile.secretId));
         if (profile.secretId && !boundSecretExists) {
             profile.secretId = '';
@@ -1859,20 +1974,23 @@ async function fetchModelsForProfile(profile, endpoint) {
             scheduleSettingsSave();
             updateCredentialEditor(profile);
         }
-        desiredSecretId = boundSecretExists ? profile.secretId : await ensureEmptySecret(SECRET_KEYS.CUSTOM);
-        if (!desiredSecretId) throw new Error('无法建立 Profile 对应的安全 Custom 密钥');
-        if (previousActiveId !== desiredSecretId && !await rotateSecretVerified(SECRET_KEYS.CUSTOM, desiredSecretId)) {
-            throw new Error('无法激活 Profile 绑定的 Custom 密钥');
+        desiredSecretId = boundSecretExists ? profile.secretId : await ensureEmptySecret(config.secretKey);
+        if (!desiredSecretId) throw new Error(`无法建立 Profile 对应的安全 ${config.label} 密钥`);
+        if (previousActiveId !== desiredSecretId && !await rotateSecretVerified(config.secretKey, desiredSecretId)) {
+            throw new Error(`无法激活 Profile 绑定的 ${config.label} 密钥`);
         }
 
         const { response, data } = await fetchJsonWithTimeout('/api/backends/chat-completions/status', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
-                chat_completion_source: chat_completion_sources.CUSTOM,
+                chat_completion_source: config.source,
                 reverse_proxy: '',
                 proxy_password: '',
-                custom_url: endpoint,
+                ...(profile.format === 'opencode' ? {
+                    opencode_endpoint: validateOpenCodeConnection(endpoint, profile.opencodeApiFormat),
+                    opencode_api_format: profile.opencodeApiFormat,
+                } : { custom_url: endpoint, custom_api_format: 'openai_compat' }),
                 custom_include_headers: profile.includeHeaders,
             }),
             cache: 'no-cache',
@@ -1880,23 +1998,28 @@ async function fetchModelsForProfile(profile, endpoint) {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const models = modelIdsFromPayload(data);
         if (!models.length) throw new Error('后端 status 响应未包含模型列表');
-        return { models, route: '后端 status fallback', frontendError };
+        return { models, route: backendOnly ? '后端 status' : '后端 status fallback', frontendError };
     } catch (backendError) {
-        const error = new Error(`前端 /models：${frontendError?.message || '失败'}；后端 status：${backendError.message}`);
+        const error = new Error(`${frontendError ? `前端 /models：${frontendError.message}；` : ''}后端 status：${backendError.message}`);
         error.cause = backendError;
         throw error;
     } finally {
-        if (previousActiveId && desiredSecretId && previousActiveId !== desiredSecretId) {
-            const restored = await rotateSecretVerified(SECRET_KEYS.CUSTOM, previousActiveId);
-            if (!restored) await enterFailClosedState('模型获取后无法恢复原 Custom 活动密钥。', SECRET_KEYS.CUSTOM);
+        try {
+            if (previousActiveId && desiredSecretId && previousActiveId !== desiredSecretId) {
+                const restored = await rotateSecretVerified(config.secretKey, previousActiveId);
+                if (!restored) await enterFailClosedState(`模型获取后无法恢复原 ${config.label} 活动密钥。`, config.secretKey);
+            }
+        } finally {
+            if (!transitionWasBlocked) endPresetTransition();
         }
     }
 }
 
 async function fetchCustomModels() {
     const profile = selectedProfile();
-    if (!profile || profile.format !== 'openai') return toastr.info('请先选择并保存 OpenAI Compatible 配置。');
+    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 OpenAI Compatible / OpenCode 配置。');
     if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('请先点击保存按钮保存当前 Key，再获取模型。');
+    if (profile.format === 'opencode' && $('#quicker_api_opencode_format').val() !== profile.opencodeApiFormat) return toastr.info('协议已变化，请先保存配置再获取模型。');
     const editorUrl = normalizeText($('#quicker_api_url').val());
     if (!editorUrl) return toastr.warning('请先填写 Custom URL。');
     if (editorUrl !== normalizeText(profile.endpoint)) return toastr.info('URL 已变化，请先保存配置；保存会清空旧远端快照并保留已选模型。');
@@ -1913,20 +2036,20 @@ async function fetchCustomModels() {
         renderStatus();
     } catch (error) {
         console.error('[QuickerApi] Model fetch failed:', error);
-        toastr.error('前端 /models 与后端 status 均获取失败。');
+        toastr.error(`获取模型失败：${error.message}`);
         renderStatus();
     }
 }
 
 async function manageCustomModels() {
     const profile = selectedProfile();
-    if (!profile || profile.format !== 'openai') return toastr.info('请先选择并保存 OpenAI Compatible 配置。');
+    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 OpenAI Compatible / OpenCode 配置。');
     if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('Key 尚未保存，请先点击保存按钮再管理或获取模型。');
     const endpoint = normalizeText($('#quicker_api_url').val());
     if (endpoint !== normalizeText(profile.endpoint)) return toastr.info('URL 已变化，请先保存配置再管理模型。');
 
     const draft = {
-        current: normalizeText(getEditorModel('openai') || profile.model),
+        current: normalizeText(getEditorModel(profile.format) || profile.model),
         available: normalizeModelList(profile.availableModels),
         fetched: profile.fetchedFromEndpoint === endpoint ? normalizeModelList(profile.fetchedModels) : [],
         fetchedFromEndpoint: profile.fetchedFromEndpoint === endpoint ? endpoint : '',
@@ -2052,7 +2175,7 @@ async function manageCustomModels() {
                 toastr.success(`通过${result.route}获取 ${result.models.length} 个模型；确认后保存快照。`);
             } catch (error) {
                 console.error('[QuickerApi] Model manager fetch failed:', error);
-                toastr.error('前端 /models 与后端 status 均获取失败。');
+                toastr.error(`获取模型失败：${error.message}`);
             } finally {
                 button.prop('disabled', false);
                 renderManager();
@@ -2154,9 +2277,9 @@ function profileOptionsHtml(selected = '') {
 function modelSuggestionsForProfile(profileId = '') {
     const profile = profiles().find(item => item.id === profileId) || null;
     if (!profile) return [];
-    if (profile.format === 'openai') return normalizeModelList([profile.model, ...(profile.availableModels || [])]);
+    if (hasManagedModels(profile.format)) return normalizeModelList([profile.model, ...(profile.availableModels || [])]);
     const native = $(FORMATS[profile.format].modelInput).find('option').map((_, option) => String(option.value || '')).get();
-    return normalizeModelList([profile.model, ...native]);
+    return normalizeModelList([profile.model, ...native]).filter(value => !platform.isModelAction(value));
 }
 
 function normalizeQuickActionPlacement(value, fallback = 'rightSendForm') {
@@ -2266,7 +2389,7 @@ async function manageQuickActions() {
         const fetchModels = $('<button type="button" class="menu_button" title="拉取所选 Profile 的模型"><i class="fa-solid fa-arrows-rotate"></i><span>拉取模型</span></button>');
         const modelControl = $('<div class="quicker-api__quick-model-control">').append(modelInput, modelSelect, fetchModels);
         const selectedProfileValue = () => profiles().find(item => item.id === detailDraft.profileId) || null;
-        fetchModels.prop('disabled', selectedProfileValue()?.format !== 'openai');
+        fetchModels.prop('disabled', !hasManagedModels(selectedProfileValue()?.format));
         name.on('input', () => { detailDraft.name = sanitizeName(name.val()); updateDetailSaveState(); });
         preset.on('change', () => { detailDraft.preset = normalizeText(preset.val()); updateDetailSaveState(); });
         profileSelect.on('change', () => {
@@ -2289,7 +2412,7 @@ async function manageQuickActions() {
         });
         fetchModels.on('click', async () => {
             const profile = selectedProfileValue();
-            if (!profile || profile.format !== 'openai') return toastr.info('请选择 OpenAI Compatible Profile 后拉取模型。');
+            if (!profile || !hasManagedModels(profile.format)) return toastr.info('请选择 OpenAI Compatible / OpenCode Profile 后拉取模型。');
             const endpoint = normalizeText(profile.endpoint);
             if (!endpoint) return toastr.warning('所选 Profile 没有可用的 Custom URL。');
             fetchModels.prop('disabled', true);
@@ -2308,7 +2431,7 @@ async function manageQuickActions() {
             if (!managerOpen || extensionDisabled || teardownPending) return;
             if (!result) {
                 if (fetchError) console.error('[QuickerApi] Quick action model fetch failed:', fetchError);
-                if (fetchError) toastr.error('前端 /models 与后端 status 均获取失败。');
+                if (fetchError) toastr.error(`获取模型失败：${error.message}`);
                 if (detailDraft) renderEditor();
                 return;
             }
@@ -2436,6 +2559,7 @@ function findFormatForCurrentSource() {
 function applyExplicitModel(model, preferredFormat = '') {
     const value = normalizeText(model);
     if (!value) return true;
+    if (platform.isModelAction(value)) return false;
     const inferredFormat = preferredFormat || findFormatForCurrentSource();
     if (!Object.hasOwn(FORMATS, inferredFormat)) return false;
     const format = inferredFormat;
@@ -2935,6 +3059,7 @@ function captureNativePresetSave(event, type) {
     if (settings().activeProfileId !== profile.id) return stop('所选 API 配置尚未安全应用，请先应用或保存 API 配置。');
     if (profile.format !== normalizeFormat($('#quicker_api_format').val())
         || FORMATS[profile.format].source !== oai_settings.chat_completion_source
+        || (profile.format === 'opencode' && $('#quicker_api_opencode_format').val() !== profile.opencodeApiFormat)
         || normalizeText($('#quicker_api_url').val()) !== normalizeText(profile.endpoint)
         || (keyEditorDirty && normalizeText($('#quicker_api_key_input').val()))) {
         return stop('URL、Key 或格式有未保存修改，请先点击 Quicker Api 的“保存 API 设置”。仅切换模型无需这一步。');
@@ -2990,8 +3115,9 @@ function bindEvents() {
         const format = normalizeFormat($(this).val());
         const source = FORMATS[format].source;
         platform.selectSource(source);
-        $('#quicker_api_url').val(String(oai_settings[FORMATS[format].endpointField] || ''));
+        $('#quicker_api_url').val(nativeEndpoint(format));
         const profile = selectedProfile()?.format === format ? selectedProfile() : null;
+        renderOpenCodeFields(profile, format);
         renderModelControl(profile);
         updateCredentialEditor(profile);
         renderStatus();
@@ -3014,10 +3140,11 @@ function bindEvents() {
     eventSource.makeLast(event_types.CHAT_COMPLETION_SETTINGS_READY, guardGenerationWhenBlocked);
     $('#quicker_api_url').on('input', function () {
         const format = normalizeFormat($('#quicker_api_format').val());
-        const proxyMode = format !== 'openai' && Boolean(normalizeText($(this).val()));
+        const proxyMode = usesProxyProfile(format, normalizeText($(this).val()));
         $('#quicker_api_native_key_manager').attr('data-key', FORMATS[format].secretKey).data('key', FORMATS[format].secretKey).toggle(!proxyMode);
         renderStatus();
     });
+    $('#quicker_api_opencode_format').on('change', renderStatus);
     $('#quicker_api_key_input').on('input', () => { keyEditorDirty = true; renderStatus(); });
     $(document).on('input.quickerApi', '#custom_include_body, #custom_exclude_body, #custom_include_headers', renderStatus);
     $(document).on('change.quickerApi', '#quicker_api_custom_model, #quicker_api_provider_model', () => {
@@ -3029,7 +3156,7 @@ function bindEvents() {
     $(document).on('click.quickerApi', '#quicker_api_manage_models', manageCustomModels);
     $(document).on('click.quickerApi', '.quicker-api__manage-actions', () => void manageQuickActions());
     $('#custom_model_id').on('input.quickerApi', handleNativeModelChange);
-    $('#model_claude_select, #model_google_select').on('change.quickerApi', handleNativeModelChange);
+    $('#model_claude_select, #model_google_select, #model_opencode_select').on('change.quickerApi', handleNativeModelChange);
     eventSource.on(event_types.CHATCOMPLETION_MODEL_CHANGED, handleNativeModelChange);
     $('#chat_completion_source').on('change.quickerApi', function () {
         platform.syncParameterEditors();
@@ -3057,7 +3184,7 @@ function configureAdditionalParametersPopup() {
     if (!excludeInput || excludeInput.dataset.quickerApiConfigured === 'true') return;
     excludeInput.dataset.quickerApiConfigured = 'true';
     const format = normalizeFormat($('#quicker_api_format').val());
-    if (format === 'openai') return;
+    if (hasManagedModels(format)) return;
     const root = $(excludeInput).closest('.height100p');
     root.addClass('quicker-api__exclude-only-popup');
     root.children('h3').removeAttr('data-i18n').text('排除主体参数');
@@ -3148,7 +3275,7 @@ async function teardownQuickerApi() {
     $(document).off('.quickerApi').off('.quickerApiMenu');
     $(window).off('.quickerApiMenu');
     $(globalThis.visualViewport).off('.quickerApiMenu');
-    $('#custom_api_url_text, #custom_model_id, #openai_reverse_proxy, #model_claude_select, #model_google_select, #chat_completion_source').off('.quickerApi');
+    $('#custom_api_url_text, #custom_model_id, #openai_reverse_proxy, #model_claude_select, #model_google_select, #model_opencode_select, #chat_completion_source').off('.quickerApi');
     eventSource.removeListener(event_types.CHATCOMPLETION_MODEL_CHANGED, handleNativeModelChange);
     eventSource.removeListener(event_types.OAI_PRESET_CHANGED_BEFORE, handleNativePresetChangeBefore);
     eventSource.removeListener(event_types.OAI_PRESET_CHANGED_AFTER, handleNativePresetChange);

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { createPlatformAdapter, inspectSettingsSave } from '../platform.js';
+import { createPlatformAdapter, inspectSettingsSave, normalizeOpenCodeEndpoint, validateOpenCodeConnection } from '../platform.js';
 
 const empty = () => ({ includeBody: '', excludeBody: '', includeHeaders: '' });
 const parameters = label => ({ includeBody: `tag: ${label}`, excludeBody: '["temperature"]', includeHeaders: `X-Test: ${label}` });
@@ -206,4 +206,26 @@ test('TauriTavern source contract: real accessor works with the same adapter', {
     assert.equal(native.additional_parameters_by_source.custom.include_body, 'tag: real host');
     assert.equal(native.additional_parameters_by_source.claude.exclude_body, '["top_p"]');
     assert.equal(native.custom_include_body, 'stale legacy body');
+});
+
+test('OpenCode official URLs resolve to native services and reject ambiguous endpoints/protocols', () => {
+    for (const [input, service] of [['zen', 'zen'], ['go', 'go'], ['https://opencode.ai/zen/v1/', 'zen'], ['https://opencode.ai/zen/go/v1', 'go']]) {
+        assert.equal(normalizeOpenCodeEndpoint(input), service);
+        for (const format of ['openai_compat', 'openai_responses', 'claude_messages']) assert.equal(validateOpenCodeConnection(input, format), service);
+    }
+    assert.equal(validateOpenCodeConnection('zen', 'gemini'), 'zen');
+    assert.throws(() => validateOpenCodeConnection('go', 'gemini'), /Go/);
+    assert.throws(() => validateOpenCodeConnection('zen', 'unknown'), /协议/);
+    for (const input of ['http://opencode.ai/zen/v1', 'https://opencode.ai.evil.test/zen/v1', 'https://key@opencode.ai/zen/v1', 'https://opencode.ai/zen/v1?key=test', 'https://opencode.ai/other', 'http://localhost:4096']) {
+        assert.throws(() => normalizeOpenCodeEndpoint(input), /OpenCode/);
+    }
+});
+
+test('rollback restores OpenCode service, protocol and model rather than retaining the failed connection', () => {
+    const { native, platform } = makeHost(true);
+    Object.assign(native, { chat_completion_source: 'opencode', opencode_endpoint: 'go', opencode_api_format: 'claude_messages', opencode_model: 'claude-test' });
+    const snapshot = platform.snapshotConnectionState();
+    Object.assign(native, { chat_completion_source: 'custom', opencode_endpoint: 'zen', opencode_api_format: 'openai_responses', opencode_model: 'other-test' });
+    platform.restoreConnectionState(snapshot);
+    assert.deepEqual([native.chat_completion_source, native.opencode_endpoint, native.opencode_api_format, native.opencode_model], ['opencode', 'go', 'claude_messages', 'claude-test']);
 });

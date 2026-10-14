@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runParameterRegressions } from './parameter-regression.mjs';
+import { runCompatibilityRegressions } from './compatibility-regression.mjs';
 
 // Run from the plugin: node tests/regression.mjs
 // Override CHROME_PATH and ST_PUBLIC_DIR when the host/browser is elsewhere.
@@ -52,7 +53,7 @@ const server = createServer(async (req, res) => {
         const url = new URL(req.url, 'http://localhost');
         if (url.pathname === '/') {
             res.setHeader('Content-Type', 'text/html; charset=utf-8');
-            res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/host.css"><link rel="stylesheet" href="/popup.css"><link rel="stylesheet" href="/plugin.css"><style>:root{--SmartThemeBlurTintColor:#20232b;--SmartThemeBodyColor:#eee;--SmartThemeBorderColor:#667;--SmartThemeQuoteColor:#9ad;--mainFontSize:16px;--mainFontFamily:Arial;--black30a:#0004}body{margin:0;padding:8px;overflow:auto;height:auto}#openai_api{display:block;max-width:700px}#native{display:none}</style></head><body><div id="openai_api"><select id="chat_completion_source"><option value="custom">Custom</option><option value="claude">Claude</option><option value="makersuite">Gemini</option>${scopedHost ? '<option value="custom_openai_responses">Responses</option>' : ''}</select></div><div id="native"><select id="settings_preset_openai"></select><button id="update_oai_preset">Update</button><button id="new_oai_preset">New</button><input id="custom_model_id"><input id="custom_api_url_text"><input id="openai_reverse_proxy"><input id="openai_proxy_password"><input id="custom_include_body"><input id="custom_exclude_body"><input id="custom_include_headers"><select id="model_claude_select"><option value="claude-model">Claude</option></select><select id="model_google_select"><option value="gemini-model">Gemini</option></select><button id="api_button_openai">Connect</button></div><script>const fixtureData=${JSON.stringify({ ...state.settings, host, presets: state.presets }).replace(/</g, '\\u003c')};</script><script src="/jquery.js"></script><script src="/fixture.js"></script><script src="/plugin.js"></script></body></html>`);
+            res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/host.css"><link rel="stylesheet" href="/popup.css"><link rel="stylesheet" href="/plugin.css"><style>:root{--SmartThemeBlurTintColor:#20232b;--SmartThemeBodyColor:#eee;--SmartThemeBorderColor:#667;--SmartThemeQuoteColor:#9ad;--mainFontSize:16px;--mainFontFamily:Arial;--black30a:#0004}body{margin:0;padding:8px;overflow:auto;height:auto}#openai_api{display:block;max-width:700px}#native{display:none}</style></head><body><div id="openai_api"><select id="chat_completion_source"><option value="custom">Custom</option><option value="claude">Claude</option><option value="makersuite">Gemini</option>${scopedHost ? '<option value="custom_openai_responses">Responses</option><option value="opencode">OpenCode</option>' : ''}</select></div><div id="native">${scopedHost ? '<select id="opencode_endpoint"><option value="zen">Zen</option><option value="go">Go</option></select><select id="opencode_api_format"><option value="openai_compat">Chat</option><option value="openai_responses">Responses</option><option value="claude_messages">Messages</option><option value="gemini">Gemini</option></select><select id="model_opencode_select"></select><input id="api_key_opencode">' : ''}<select id="settings_preset_openai"></select><button id="update_oai_preset">Update</button><button id="new_oai_preset">New</button><input id="custom_model_id"><input id="custom_api_url_text"><input id="openai_reverse_proxy"><input id="openai_proxy_password"><input id="custom_include_body"><input id="custom_exclude_body"><input id="custom_include_headers"><select id="model_claude_select"><option value="claude-model">Claude</option></select><select id="model_google_select"><option value="gemini-model">Gemini</option></select><button id="api_button_openai">Connect</button></div><script>const fixtureData=${JSON.stringify({ ...state.settings, host, presets: state.presets }).replace(/</g, '\\u003c')};</script><script src="/jquery.js"></script><script src="/fixture.js"></script><script src="/plugin.js"></script></body></html>`);
             return;
         }
         if (assets[url.pathname]) {
@@ -166,7 +167,7 @@ try {
     const run = page.evaluate;
     assert.deepEqual(await run('[Boolean(document.getElementById("quicker_api_storage")), Boolean(document.getElementById("quicker_api_save"))]'), [false, true]);
     log('redundant storage button is removed while the API save button remains');
-    assert.deepEqual(await run('[settings().schemaVersion, settings().presetModels.A.model, settings().presetModels.B.model]'), [13, 'model-a', 'model-b']);
+    assert.deepEqual(await run('[settings().schemaVersion, settings().presetModels.A.model, settings().presetModels.B.model]'), [14, 'model-a', 'model-b']);
     log('schema 12 migration preserves distinct native preset models');
     assert.deepEqual(await run('[panelCollapsed, Object.hasOwn(settings(), "panelCollapsed"), document.getElementById("quicker_api_body").hidden]'), [false, false, false]);
     log('legacy server fold flag is removed and does not control browser defaults');
@@ -358,6 +359,7 @@ try {
 
     await other.evaluate('teardownQuickerApi()');
     await runParameterRegressions({ page: await newPage(), state, scopedHost, log });
+    await runCompatibilityRegressions({ page: await newPage(), scopedHost, log });
     assert.deepEqual(exceptions, [], `Unexpected browser exceptions: ${JSON.stringify(exceptions)}`);
     console.log(`\n${passed} regression checks passed (${host}). Host APIs and account data were simulated in memory.`);
 } finally {

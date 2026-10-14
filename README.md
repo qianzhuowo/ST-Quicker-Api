@@ -15,7 +15,17 @@ Quicker Api 界面直接显示在 SillyTavern 原生的 **API 连接配置** 中
 - Anthropic/Gemini 仍只由插件管理“排除主体参数”。TauriTavern 原生已有的该来源附加 Body/Headers 会保留，不被插件顺带清空，也不随 Quicker Profile 切换。
 - 暂不新增 TauriTavern 的 OpenAI Responses、Claude Messages、Gemini Interactions 等 Custom 子协议 Profile。它们不会被当作普通 OpenAI Compatible 配置导入。
 
-**升级提醒：** 旧版插件在 TauriTavern 中可能已经漏存附加参数。升级不能凭空恢复未保存的内容；更新前建议备份原生附加参数，更新后重新填写并保存受影响的 Profile。既有 Profile 的数据结构无需转换。
+**升级提醒：** 旧版插件在 TauriTavern 中可能已经漏存附加参数。升级不能凭空恢复未保存的内容；更新前建议备份原生附加参数，更新后重新填写并保存受影响的 Profile。既有 Profile 自动升级配置结构，原 Custom 配置不会自动转换为 OpenCode。
+
+### TT 中连接 OpenCode
+
+1. 在插件 **格式** 中选择 **OpenCode (Zen / Go)**。
+2. URL 填 `zen` / `go`，也可填写 `https://opencode.ai/zen/v1` / `https://opencode.ai/zen/go/v1`。
+3. 选择与模型匹配的 **OpenCode 协议**：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 或 Gemini。Go 不支持 Gemini，插件会在保存前拒绝该组合。
+4. 填写 Key 并保存，再获取或手动添加模型。旧配置使用的是另一密钥槽，切换为 OpenCode 时请重新填写 Key，或先在 TT 原生 OpenCode 中配置再导入。
+
+仅官方 OpenCode Zen / Go 适用；本地 OpenCode 服务、第三方转换服务应按其实际接口使用 Custom / Anthropic 等格式。
+
 
 ## 功能预览
 
@@ -49,8 +59,8 @@ Quicker Api 界面直接显示在 SillyTavern 原生的 **API 连接配置** 中
 ## 主要功能
 
 - **多配置管理** — 保存多个 API 配置，快速新增、切换、重命名、复制和删除
-- **支持三种格式** — OpenAI Compatible、Anthropic、Gemini
-- **统一保存** — 一次保存 API 格式、URL、Key、模型和配置名称；三种格式均可按 Profile 保存排除主体参数
+- **多种格式** — OpenAI Compatible、Anthropic、Gemini；支持原生 OpenCode 的宿主额外提供 OpenCode (Zen / Go)
+- **统一保存** — 一次保存 API 格式、URL、Key、模型和配置名称；所有支持格式均可按 Profile 保存排除主体参数
 - **快捷 URL** — 一键填入 SillyTavern 常用服务端点，也可添加和删除自己的 URL 简称
 - **原生密钥管理** — 密钥继续保存在 SillyTavern 的原生 Secrets 中，不写进插件配置
 - **模型列表管理** — 从 API 获取模型，也可以手动添加、编辑、排序和筛选模型
@@ -72,6 +82,7 @@ Quicker Api 界面直接显示在 SillyTavern 原生的 **API 连接配置** 中
 |---|---|---|
 | OpenAI Compatible | Custom（兼容 OpenAI） | 支持自定义 URL、Key、模型和附加参数，并保留原生 Custom 推理内容解析 |
 | Anthropic | Claude | 可使用官方 API或 其它支持 Claude 格式的端点，并支持按 Profile 排除请求顶层参数 |
+| OpenCode (Zen / Go) | OpenCode（需宿主支持） | 使用原生渠道、协议和密钥槽，支持模型列表及附加参数 |
 | Gemini | Google AI Studio | 可使用官方 API或 其它支持 Gemini 格式的端点，并支持按 Profile 排除请求顶层参数 |
 
 ## 安装
@@ -159,7 +170,7 @@ Key 输入框支持：
 
 ## 模型列表
 
-OpenAI Compatible 配置提供：
+OpenAI Compatible 和 OpenCode 配置提供：
 
 - **添加** — 手动添加任意模型 ID
 - **获取模型** — 从当前 API 的 `/models` 获取模型
@@ -167,11 +178,11 @@ OpenAI Compatible 配置提供：
 
 每个 API 配置都有自己独立的模型列表。切换配置时，对应的模型列表也会一起切换。
 
-如果浏览器无法直接访问 `/models`，插件会自动尝试通过 SillyTavern 后端获取。
+SillyTavern 中优先直接访问 `/models`，失败后尝试后端；TauriTavern 直接使用后端，无需明文 Key 或浏览器跨域权限。附加请求头支持与原生编辑器一致的 YAML / JSON 对象。
 
 ## 导入原生 OAI 设置
 
-点击 **导入原 OAI 设置**，可以扫描 SillyTavern 当前 OpenAI 配置
+点击 **导入原 OAI 设置**，可以扫描 SillyTavern 当前 OpenAI 配置；在 TT 原生 OpenCode 来源下也可导入当前 OpenCode 配置及其绑定密钥。
 
 插件会自动过滤已经导入过的相同配置，选择需要的配置后点击“添加”即可。
 
@@ -286,30 +297,6 @@ API 配置保存和便捷方案总保存会等待服务器确认。保存失败�
 业务代码保留在 `index.js`；宿主差异集中在 `platform.js`。新增平台差异时优先扩展适配层，不在 Profile、密钥、预设和便捷方案中散落平台判断。
 
 测试需要 Node.js 22+。浏览器回归还需要 Chromium/Chrome/Edge，以及 SillyTavern 的 `public` 静态资源；插件不在 SillyTavern 目录内时，可设置 `ST_PUBLIC_DIR`，浏览器不在常见位置时可设置 `CHROME_PATH`。
-
-```powershell
-# 适配层单元测试（不需要浏览器）
-node --test tests/platform.test.mjs
-
-# 双宿主浏览器回归
-$env:QUICKER_TEST_HOST = 'sillytavern'
-node tests/regression.mjs
-$env:QUICKER_TEST_HOST = 'tauritavern'
-node tests/regression.mjs
-
-# 可选：直接加载本机 TauriTavern 源码中的参数访问器做契约验证
-$env:TT_SOURCE_DIR = 'E:\AiChat\TauriTavern-2.2.0'
-node --test tests/platform.test.mjs
-```
-
-浏览器测试仅使用内存模拟的设置/密钥接口、虚构 Profile 和临时浏览器目录，不连接真实模型、不读写真实账户配置。测试包含参数 A/B/空配置切换、跨来源隔离、原生编辑/保存、预设联动、便捷方案、启动恢复、导入、失败回滚、全量/增量保存失败与并发修改。
-
-更新到真实应用后，建议再手动检查：
-
-1. 在两个 Profile 中填写不同的 Body、排除规则和 Headers，保存后反复切换，重新打开原生附加参数弹窗核对。
-2. 发送到自己控制的测试端点，检查实际收到的请求主体和请求头；自动化测试不替代后端端到端验证。
-3. 切换绑定预设及便捷方案，重启应用后确认参数与配置仍一致。
-4. 检查 Anthropic/Gemini 的排除规则，以及切换 Profile 不会清空该来源其他原生参数。
 
 ## 卸载
 
