@@ -46,9 +46,11 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
     assert.equal(await run(`document.querySelector('.quicker-api__key-actions').children[2].id`), 'quicker_api_reveal_key');
     const helpText = await run(`document.getElementById('quicker_api_key_help_tooltip').innerText`);
     if (scopedHost) {
-        assert.match(helpText, /设置/);
+        assert.match(helpText, /用户设置/);
+        assert.match(helpText, /TauriTavern Settings（齿轮）/);
         assert.match(helpText, /Misc（杂项）/);
-        assert.match(helpText, /Allow Keys Exposure/);
+        assert.match(helpText, /允许显示密钥/);
+        assert.match(helpText, /不在 SillyTavern 原生杂项页/);
         assert.match(helpText, /重启 TauriTavern/);
     } else {
         assert.match(helpText, /config\.yaml/);
@@ -60,7 +62,12 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
     assert.equal(await run(`(()=>{document.getElementById('quicker_api_key_help').focus(); return getComputedStyle(document.getElementById('quicker_api_key_help_tooltip')).display;})()`), 'block');
     await run(`document.getElementById('quicker_api_key_help').blur(); messages.length=0; readBoundSecret(compatCustom)`);
     const deniedWarning = await run(`messages.find(item=>item.level==='warning')?.message || ''`);
-    if (scopedHost) assert.match(deniedWarning, /TauriTavern.*设置 → Misc（杂项）→ Allow Keys Exposure.*重启 TauriTavern/);
+    if (scopedHost) {
+        assert.match(deniedWarning, /用户设置 → TauriTavern Settings（齿轮）→ Misc（杂项）/);
+        assert.match(deniedWarning, /允许显示密钥/);
+        assert.match(deniedWarning, /只用于查看或复制密钥，不影响获取模型/);
+        assert.match(deniedWarning, /重启 TauriTavern/);
+    }
     else assert.match(deniedWarning, /config\.yaml.*allowKeysExposure.*true.*重启 SillyTavern/);
     assert.doesNotMatch(deniedWarning, /findSecret/);
     log('key help is left of reveal and denied plaintext access shows host-specific instructions');

@@ -459,10 +459,10 @@ function initializeSettings() {
 function keyExposureGuidance() {
     if (platform.isTauriHost) {
         return {
-            warning: '请在 TauriTavern 的“设置 → Misc（杂项）→ Allow Keys Exposure”中启用密钥明文访问，保存后重启 TauriTavern。',
+            warning: '请打开“用户设置 → TauriTavern Settings（齿轮）→ Misc（杂项）”，启用“允许显示密钥”，保存后重启 TauriTavern。该权限只用于查看或复制密钥，不影响获取模型。',
             title: '在 TauriTavern 中允许查看密钥',
-            intro: '打开 TauriTavern 的设置：',
-            steps: ['进入 Misc（杂项）', '启用 Allow Keys Exposure', '保存设置后重启 TauriTavern'],
+            intro: '这是 TauriTavern 的独立设置，不在 SillyTavern 原生杂项页中：',
+            steps: ['打开用户设置面板', '点击 TauriTavern Settings（齿轮）', '进入 Misc（杂项）并启用“允许显示密钥”', '保存设置后重启 TauriTavern'],
         };
     }
     return {

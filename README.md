@@ -169,7 +169,7 @@ Key 输入框支持：
 切换配置时，插件不会自动把已保存密钥明文填进输入框。只有点击眼睛或复制时，才会按需读取密钥。
 
 - **SillyTavern**：在 `config.yaml` 中设置 `allowKeysExposure: true`，然后重启 SillyTavern。
-- **TauriTavern**：打开 **设置 → Misc（杂项）→ Allow Keys Exposure**，启用并保存后重启 TauriTavern。
+- **TauriTavern**：打开酒馆的**用户设置**面板，点击独立的 **TauriTavern Settings（齿轮）**，进入 **Misc（杂项）**，启用中文界面中的 **允许显示密钥**（`Allow Keys Exposure`），保存后重启 TauriTavern。
 
 该设置只影响查看、复制及历史密钥明文去重；TT 通过后端获取模型不需要开启密钥明文权限。
 
