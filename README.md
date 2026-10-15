@@ -185,6 +185,17 @@ OpenAI Compatible、Claude（Anthropic）、Gemini 和 OpenCode 配置均提供�
 
 SillyTavern 的 OpenAI Compatible 优先直接访问 `/models`，失败后尝试后端；Claude、Gemini、OpenCode 以及 TauriTavern 使用后端查询，无需读取已保存 Key 的明文。远端获取取决于宿主和服务是否支持模型列表接口；部分 SillyTavern 版本不支持 Claude 模型查询，此时会明确提示失败，仍可手动添加模型。附加请求头支持与原生编辑器一致的 YAML / JSON 对象。
 
+## TT Custom 子协议
+
+在 TauriTavern 中，插件额外支持：
+
+- 自定义（兼容 OpenAI Responses）
+- 自定义（兼容 Claude Messages）
+- 自定义（兼容 Gemini generateContent）
+- 自定义（兼容 Gemini Interactions）
+
+可从 TT 原生聊天补全来源或插件格式列表切换。它们使用 TT 原生 Custom 协议处理和 Custom 密钥槽，各协议的附加参数独立保存。
+
 ## 导入原生 OAI 设置
 
 点击 **导入原 OAI 设置**，可以扫描 SillyTavern 当前 OpenAI 配置；在 TT 原生 OpenCode 来源下也可导入当前 OpenCode 配置及其绑定密钥。

@@ -120,10 +120,10 @@ export async function runParameterRegressions({ page, state, scopedHost, log }) 
     assert.equal(imported.includeHeaders, 'X-Edited: true');
     if (scopedHost) {
         await run(`$('#chat_completion_source').val('custom_openai_responses').trigger('change')`);
-        assert.equal(await run(`(async () => (await collectNativeImportCandidates({})).some(p => p.sourceRef === 'current-custom'))()`), false);
+        assert.equal(await run(`(async () => (await collectNativeImportCandidates({})).find(p => p.sourceRef === 'current-custom')?.format)()`), 'openai_responses');
     }
     await run(`applyProfileById('params-a')`);
-    log('native Custom import reads the correct parameter slot and does not mislabel unsupported protocols');
+    log('native Custom import reads the correct parameter slot and retains the exact protocol');
 
     await run(`switchTestPreset('A')`);
     assert.equal(await run('persistSettingsNow()'), true);

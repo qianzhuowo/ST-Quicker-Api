@@ -104,7 +104,7 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
         for (const [profileKey, scopedKey, legacyKey] of PARAMETER_FIELDS) {
             // Quicker manages only exclusions for Claude/Gemini. Preserve the
             // host's independent body/headers rather than silently clearing them.
-            if (usesSourceParameters && source !== customSource && source !== openai.chat_completion_sources.OPENCODE && profileKey !== 'excludeBody') continue;
+            if (usesSourceParameters && !Object.values(CUSTOM_FORMAT_SELECTIONS).includes(source) && source !== openai.chat_completion_sources.OPENCODE && profileKey !== 'excludeBody') continue;
             entry[usesSourceParameters ? scopedKey : legacyKey] = String(profile?.[profileKey] || '');
         }
         syncParameterEditors({ emitLegacyInput: true });
@@ -115,17 +115,23 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
             || settings.custom_api_format === 'openai_compat';
     }
 
-    function matchesSource(source, settings = native) {
-        return settings.chat_completion_source === source
-            && (source !== customSource || supportsCustomConnection(settings));
+    function supportsCustomFormat(apiFormat = 'openai_compat') {
+        return apiFormat === 'openai_compat' || (usesSourceParameters && Object.hasOwn(native, 'custom_api_format') && Object.hasOwn(CUSTOM_FORMAT_SELECTIONS, apiFormat));
     }
 
-    function selectSource(source) {
+    function matchesSource(source, settings = native, apiFormat = 'openai_compat') {
+        return settings.chat_completion_source === source
+            && (source !== customSource || (settings.custom_api_format || 'openai_compat') === apiFormat);
+    }
+
+    function selectSource(source, apiFormat = 'openai_compat') {
+        if (source === customSource && !supportsCustomFormat(apiFormat)) throw new Error('当前宿主不支持该 Custom 协议。');
+        const selection = source === customSource ? CUSTOM_FORMAT_SELECTIONS[apiFormat] : source;
         rememberParameterEditors();
-        const changed = !matchesSource(source) || ($ && $('#chat_completion_source').val() !== source);
+        const changed = !matchesSource(source, native, apiFormat) || ($ && $('#chat_completion_source').val() !== selection);
         native.chat_completion_source = source;
-        if (source === customSource && Object.hasOwn(native, 'custom_api_format')) native.custom_api_format = 'openai_compat';
-        if (changed && $) $('#chat_completion_source').val(source).trigger('change');
+        if (source === customSource && Object.hasOwn(native, 'custom_api_format')) native.custom_api_format = apiFormat;
+        if (changed && $) $('#chat_completion_source').val(selection).trigger('change');
         syncParameterEditors();
     }
 
@@ -198,7 +204,8 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
     return {
         readAdditionalParameters, writeAdditionalParameters, matchesSource, selectSource, supportsCustomConnection,
         snapshotConnectionState, restoreConnectionState, rememberParameterEditors, syncParameterEditors,
-        cancelSettingsSave, dispose,
+        cancelSettingsSave, dispose, supportsCustomFormat,
+        customSelection: apiFormat => CUSTOM_FORMAT_SELECTIONS[apiFormat || 'openai_compat'],
         isModelAction: value => typeof openai.isCustomModelActionValue === 'function' && openai.isCustomModelActionValue(value),
         supportsOpenCode: Boolean(openai.chat_completion_sources.OPENCODE && openai.OPENCODE_API_FORMAT),
         isTauriHost: globalThis.__TAURI_RUNNING__ === true || usesSourceParameters,

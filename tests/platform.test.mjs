@@ -33,6 +33,25 @@ function makeHost(modern, accessor) {
     return { native, platform, calls };
 }
 
+for (const protocol of ['openai_responses', 'claude_messages', 'gemini_generate_content', 'gemini_interactions']) {
+    test(`Custom ${protocol}: native routing, independent parameters and legacy rejection`, () => {
+        const { native, platform } = makeHost(true);
+        platform.writeAdditionalParameters(parameters('original'), 'custom');
+        platform.writeAdditionalParameters(parameters(protocol), platform.customSelection(protocol));
+        platform.selectSource('custom', protocol);
+        assert.equal(native.chat_completion_source, 'custom');
+        assert.equal(native.custom_api_format, protocol);
+        assert.equal(platform.matchesSource('custom', native, protocol), true);
+        assert.equal(platform.matchesSource('custom'), false);
+        assert.deepEqual(platform.readAdditionalParameters(), parameters(protocol));
+        assert.deepEqual(platform.readAdditionalParameters('custom'), parameters('original'));
+        const legacy = makeHost(false);
+        const before = structuredClone(legacy.native);
+        assert.throws(() => legacy.platform.selectSource('custom', protocol));
+        assert.deepEqual(legacy.native, before);
+    });
+}
+
 for (const modern of [false, true]) {
     const name = modern ? 'source-scoped host' : 'legacy host';
     test(`${name}: parameter round trip and empty Profile clears previous values`, () => {

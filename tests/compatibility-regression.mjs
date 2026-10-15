@@ -78,6 +78,54 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
         log(`${format} has all model controls, retains native/custom models and restores credentials on success/failure without plaintext`);
     }
     await run(`renderProfiles(compatCustom.id); compatRequests=[]`);
+    await run(`compatRequests=[]; $('#chat_completion_source').val('makersuite').trigger('change')`);
+    assert.equal(await run(`compatRequests.some(r=>r.url.endsWith('/status') || r.url.endsWith('/rotate'))`), false);
+    assert.equal(await run(`$('#quicker_api_format').val()`), 'gemini');
+    log('native Google AI Studio selection only refreshes plugin UI; plugin adds no status request or credential rotation');
+    await run(`renderProfiles(compatCustom.id); compatRequests=[]`);
+    if (scopedHost) {
+        for (const protocol of ['openai_responses', 'claude_messages', 'gemini_generate_content', 'gemini_interactions']) {
+            const result = await run(`(async () => {
+                const protocol = ${JSON.stringify(protocol)};
+                const p = normalizeProfile({id:'protocol-'+protocol, format:protocol, endpoint:'https://protocol.invalid/v1', model:'protocol-model', secretId:'bound', includeBody:'{"tag":"'+protocol+'"}', includeHeaders:'{"X-Protocol":"'+protocol+'"}'});
+                settings().profiles.push(p);
+                $('#chat_completion_source').val('custom_'+protocol).trigger('change');
+                const panel = getComputedStyle(document.getElementById('quicker_api')).display !== 'none';
+                const selected = $('#quicker_api_format').val();
+                const applied = await applyProfile(p);
+                const snapshot = snapshotNative();
+                const captured = captureNativeProfile('Captured', protocol, p);
+                compatRequests=[];
+                await fetchModelsForProfile(p, p.endpoint);
+                const request = compatRequests.find(r=>r.url.endsWith('/status')).body;
+                const params = nativeAdditionalParameters();
+                const wrongProtocolMatches = matchesFormat(protocol, {...oai_settings, custom_api_format:'openai_compat'});
+                platform.selectSource('custom'); restoreNative(snapshot);
+                return {panel, selected, applied, captured:captured.format, capturedBody:captured.includeBody, request, params, wrongProtocolMatches,
+                    source:oai_settings.chat_completion_source, protocol:oai_settings.custom_api_format, selection:$('#chat_completion_source').val()};
+            })()`);
+            assert.equal(result.panel, true);
+            assert.equal(result.selected, protocol);
+            assert.equal(result.applied, true);
+            assert.equal(result.captured, protocol);
+            assert.equal(result.capturedBody, JSON.stringify({tag:protocol}));
+            assert.equal(result.params.includeBody, result.capturedBody);
+            assert.equal(result.request.custom_api_format, protocol);
+            assert.equal(result.request.chat_completion_source, 'custom');
+            assert.equal(result.source, 'custom');
+            assert.equal(result.protocol, protocol);
+            assert.equal(result.selection, 'custom_'+protocol);
+            assert.equal(result.wrongProtocolMatches, false);
+            log(`${protocol}: native selector, panel, apply, parameter isolation, capture, model request and rollback`);
+        }
+        await run(`(async()=>{ await applyProfile(compatCustom); for (const e of compatSecrets.api_key_custom) e.active=e.id==='original'; renderProfiles(compatCustom.id); compatRequests=[]; })()`);
+    } else {
+        for (const protocol of ['openai_responses', 'claude_messages', 'gemini_generate_content', 'gemini_interactions']) {
+            assert.equal(await run(`$('#quicker_api_format option[value="${protocol}"]').length`), 0);
+            assert.equal(await run(`applyProfile(normalizeProfile({format:'${protocol}',endpoint:'https://protocol.invalid'}))`), false);
+        }
+        log('legacy host hides TT Custom protocols and refuses to apply them without mutating credentials');
+    }
     assert.equal(await run(`document.querySelector('.quicker-api__key-actions').children[0].id`), 'quicker_api_key_help');
     assert.equal(await run(`document.querySelector('.quicker-api__key-actions').children[2].id`), 'quicker_api_reveal_key');
     const helpText = await run(`document.getElementById('quicker_api_key_help_tooltip').innerText`);
@@ -199,8 +247,8 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
         `);
         assert.equal(await run(`$('#quicker_api_custom_model option[value="__manage_models__"]').length`), 0);
         assert.equal(await run(`modelSuggestionsForProfile('compat-claude').includes('__manage_models__')`), false);
-        assert.equal(await run(`collectNativeImportCandidates(compatSecrets).then(c=>c.some(p=>p.sourceRef==='connection-manager:unsupported-custom'))`), false);
-        log('TT model action entries and unsupported Connection Manager Custom protocols are not imported as models/connections');
+        assert.equal(await run(`collectNativeImportCandidates(compatSecrets).then(c=>c.find(p=>p.sourceRef==='connection-manager:unsupported-custom')?.format)`), 'openai_responses');
+        log('TT filters model action entries and imports Connection Manager Custom with its exact protocol');
 
         // Failure to restore must leave a confirmed empty key, not the probe key.
         await run(`for (const e of compatSecrets.api_key_custom) e.active=e.id==='original'; compatFailRestore=true; fetchModelsForProfile(compatCustom,compatCustom.endpoint)`);
