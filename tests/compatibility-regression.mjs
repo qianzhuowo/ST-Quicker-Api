@@ -42,6 +42,42 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
         settings().selectedProfileId = compatCustom.id;
         renderProfiles(compatCustom.id);
     `);
+    for (const format of ['anthropic', 'gemini']) {
+        const result = await run(`(async () => {
+            const format = ${JSON.stringify(format)};
+            const p = normalizeProfile({id:'provider-test', format, model:'saved-model', availableModels:['added-model'], secretId:'bound'});
+            $('#quicker_api_format').val(format); renderModelControl(p);
+            const controls = ['add_model','fetch_models','manage_models'].every(id => document.getElementById('quicker_api_'+id));
+            const options = $('#quicker_api_custom_model option').toArray().map(o => o.value);
+            compatRequests = [];
+            const result = await fetchModelsForProfile(p, '');
+            const request = compatRequests.find(r => r.url.endsWith('/status')).body;
+            return {controls, options, models:result.models, request,
+                active:compatSecrets[FORMATS[format].secretKey].find(e=>e.active).id,
+                plaintext:compatRequests.some(r=>r.url.endsWith('/find'))};
+        })()`);
+        assert.equal(result.controls, true);
+        assert.ok(result.options.includes('added-model'));
+        assert.ok(result.options.includes(format === 'anthropic' ? 'claude-model' : 'gemini-model'));
+        assert.deepEqual(result.models, ['remote-model']);
+        assert.equal(result.request.chat_completion_source, format === 'anthropic' ? 'claude' : 'makersuite');
+        assert.equal(result.request.reverse_proxy, '');
+        assert.equal(result.request.custom_url, undefined);
+        assert.equal(result.active, 'original');
+        assert.equal(result.plaintext, false);
+        const failureRestored = await run(`(async () => {
+            const format = ${JSON.stringify(format)};
+            compatFailStatus = true;
+            let rejected = false;
+            try { await fetchModelsForProfile(normalizeProfile({format, secretId:'bound'}), ''); }
+            catch { rejected = true; }
+            finally { compatFailStatus = false; }
+            return rejected && compatSecrets[FORMATS[format].secretKey].find(e=>e.active).id === 'original';
+        })()`);
+        assert.equal(failureRestored, true);
+        log(`${format} has all model controls, retains native/custom models and restores credentials on success/failure without plaintext`);
+    }
+    await run(`renderProfiles(compatCustom.id); compatRequests=[]`);
     assert.equal(await run(`document.querySelector('.quicker-api__key-actions').children[0].id`), 'quicker_api_key_help');
     assert.equal(await run(`document.querySelector('.quicker-api__key-actions').children[2].id`), 'quicker_api_reveal_key');
     const helpText = await run(`document.getElementById('quicker_api_key_help_tooltip').innerText`);
@@ -161,7 +197,7 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
             settings().profiles.push(compatClaude);
             $('#quicker_api_format').val('anthropic'); renderModelControl(compatClaude);
         `);
-        assert.equal(await run(`$('#quicker_api_provider_model option[value="__manage_models__"]').length`), 0);
+        assert.equal(await run(`$('#quicker_api_custom_model option[value="__manage_models__"]').length`), 0);
         assert.equal(await run(`modelSuggestionsForProfile('compat-claude').includes('__manage_models__')`), false);
         assert.equal(await run(`collectNativeImportCandidates(compatSecrets).then(c=>c.some(p=>p.sourceRef==='connection-manager:unsupported-custom'))`), false);
         log('TT model action entries and unsupported Connection Manager Custom protocols are not imported as models/connections');

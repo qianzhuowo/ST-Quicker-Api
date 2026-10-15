@@ -326,6 +326,20 @@ try {
         assert.ok(layout.hit, `Header save is clipped at ${width}x${height}`);
         assert.ok(!layout.overflows, `Horizontal overflow at ${width}x${height}`);
         assert.ok(layout.detail.top >= 0 && layout.detail.bottom <= height, `Detail save is unreachable: ${JSON.stringify(layout)}`);
+        const modelLayout = await run(`(() => {
+            const rect = selector => document.querySelector(selector).getBoundingClientRect();
+            const title = rect('.quicker-api__model-field > label');
+            const fetch = rect('#quicker_api_fetch_models');
+            const add = rect('#quicker_api_add_model');
+            return {
+                header: Math.abs(title.top + title.height/2 - fetch.top - fetch.height/2) < 2 && Math.abs(fetch.top-add.top) < 2 && fetch.left >= title.right && add.left >= fetch.right,
+                horizontal: [...document.querySelectorAll('#quicker_api_model_control button')].every(b => getComputedStyle(b).whiteSpace === 'nowrap' && b.scrollWidth <= b.clientWidth + 2),
+                contained: fetch.right <= innerWidth && add.right <= innerWidth,
+            };
+        })()`);
+        assert.ok(modelLayout.horizontal && modelLayout.contained, JSON.stringify({width, modelLayout}));
+        if (width <= 760) assert.ok(modelLayout.header, JSON.stringify({width, modelLayout}));
+        log(`model actions stay horizontal and mobile title actions align at ${width}x${height}`);
         log(`save buttons remain accessible at ${width}x${height}, including long names`);
     }
     await run(`document.querySelector('dialog[open] .quicker-api__quick-field input').value='Unsaved'; $('dialog[open] .quicker-api__quick-field input').first().trigger('input'); $('dialog[open] .quicker-api__quick-header-actions .quicker-api__save-button').trigger('click')`);

@@ -223,6 +223,10 @@ function makeId(prefix = 'profile') {
 }
 
 function hasManagedModels(format) {
+    return Object.hasOwn(FORMATS, format);
+}
+
+function supportsCustomParameters(format) {
     return format === 'openai' || format === 'opencode';
 }
 
@@ -340,9 +344,9 @@ function normalizeProfile(raw) {
         fetchedFromEndpoint: hasManagedModels(format)
             ? String(raw?.fetchedFromEndpoint || (raw?.fetchedModels?.length ? raw?.endpoint : '') || '').slice(0, 2048)
             : '',
-        includeBody: hasManagedModels(format) ? String(raw?.includeBody || '').slice(0, 100000) : '',
+        includeBody: supportsCustomParameters(format) ? String(raw?.includeBody || '').slice(0, 100000) : '',
         excludeBody: String(raw?.excludeBody || '').slice(0, 100000),
-        includeHeaders: hasManagedModels(format) ? String(raw?.includeHeaders || '').slice(0, 100000) : '',
+        includeHeaders: supportsCustomParameters(format) ? String(raw?.includeHeaders || '').slice(0, 100000) : '',
         secretId: String(raw?.secretId || ''),
         proxyPreset: String(raw?.proxyPreset || ''),
         needsSecret: Boolean(raw?.needsSecret),
@@ -709,37 +713,26 @@ function applyNativeAdditionalParameters(profile) {
     platform.writeAdditionalParameters(profile, FORMATS[profile.format].source);
 }
 
+function nativeProviderModels(format) {
+    if (format !== 'anthropic' && format !== 'gemini') return [];
+    return $(FORMATS[format].modelInput).find('option').toArray()
+        .map(option => option.value).filter(value => !platform.isModelAction(value));
+}
+
 function renderModelControl(profile = selectedProfile(), modelOverride = null) {
     const format = normalizeFormat($('#quicker_api_format').val());
     const root = $('#quicker_api_model_control').empty();
-    if (!hasManagedModels(format)) {
-        const nativeSelect = $(FORMATS[format].modelInput);
-        const draftSelect = $('<select id="quicker_api_provider_model" class="text_pole flex1" aria-label="Provider 模型">');
-        nativeSelect.find('option').each((_, option) => {
-            if (!platform.isModelAction(option.value)) draftSelect.append($(option).clone());
-        });
-        const providerModel = normalizeText(modelOverride ?? profile?.model ?? oai_settings[FORMATS[format].modelField]);
-        if (!draftSelect.find('option').filter((_, option) => option.value === providerModel).length) {
-            draftSelect.append($('<option>').val(providerModel).text(providerModel || '— 选择模型 —'));
-        }
-        draftSelect.val(providerModel);
-        root.append(
-            draftSelect,
-            $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
-        );
-        renderPanelSummary();
-        return;
-    }
     const current = normalizeText(modelOverride ?? profile?.model ?? oai_settings[FORMATS[format].modelField]);
-    const models = normalizeModelList([...(profile?.availableModels || []), current]);
-    const select = $('<select id="quicker_api_custom_model" class="text_pole flex1" aria-label="Custom 模型">')
+    const nativeModels = nativeProviderModels(format);
+    const models = normalizeModelList([...(profile?.customized ? [] : nativeModels), ...(profile?.availableModels || []), current]);
+    const select = $('<select id="quicker_api_custom_model" class="text_pole flex1" aria-label="模型">')
         .append($('<option>').val('').text('— 选择模型 —'));
     for (const model of models) select.append($('<option>').val(model).text(model));
     select.val(current);
     root.append(
         select,
-        $('<button id="quicker_api_add_model" class="menu_button" type="button" title="添加并使用自定义模型" aria-label="添加并使用自定义模型"><i class="fa-solid fa-plus"></i><span class="quicker-api__desktop-label">添加</span></button>'),
-        $('<button id="quicker_api_fetch_models" class="menu_button" type="button" title="通过 SillyTavern status 后端获取模型"><i class="fa-solid fa-arrows-rotate"></i><span class="quicker-api__desktop-label">获取模型</span><span class="quicker-api__mobile-label">获取</span></button>'),
+        $('<button id="quicker_api_add_model" class="menu_button" type="button" title="添加并使用自定义模型" aria-label="添加并使用自定义模型"><i class="fa-solid fa-plus"></i><span class="quicker-api__desktop-label">添加</span><span class="quicker-api__mobile-label">添加模型</span></button>'),
+        $('<button id="quicker_api_fetch_models" class="menu_button" type="button" title="通过 SillyTavern status 后端获取模型"><i class="fa-solid fa-arrows-rotate"></i><span class="quicker-api__desktop-label">获取模型</span><span class="quicker-api__mobile-label">获取模型</span></button>'),
         $('<button id="quicker_api_manage_models" class="menu_button" type="button" title="管理自定义与远端模型列表"><i class="fa-solid fa-list-check"></i><span class="quicker-api__desktop-label">管理模型列表</span><span class="quicker-api__mobile-label">管理模型</span></button>'),
         $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
     );
@@ -787,7 +780,7 @@ function profileMatchesNative(profile) {
     }
     const additional = nativeAdditionalParameters();
     if (additional.excludeBody !== profile.excludeBody) return false;
-    return !hasManagedModels(profile.format)
+    return !supportsCustomParameters(profile.format)
         || (additional.includeBody === profile.includeBody
             && additional.includeHeaders === profile.includeHeaders);
 }
@@ -804,7 +797,7 @@ function editorHasUnsavedChanges(profile) {
         || (profile.format === 'opencode' && $('#quicker_api_opencode_format').val() !== profile.opencodeApiFormat)
         || getEditorModel() !== editorModelBaseline
         || additional.excludeBody !== profile.excludeBody
-        || (hasManagedModels(profile.format) && (additional.includeBody !== profile.includeBody
+        || (supportsCustomParameters(profile.format) && (additional.includeBody !== profile.includeBody
             || additional.includeHeaders !== profile.includeHeaders))
         || (keyEditorDirty && Boolean(normalizeText($('#quicker_api_key_input').val())));
 }
@@ -1261,9 +1254,9 @@ function captureNativeProfile(name, format, existing = {}) {
         opencodeApiFormat: normalizedFormat === 'opencode' ? oai_settings.opencode_api_format : '',
         endpoint,
         model: getEditorModel(normalizedFormat),
-        includeBody: hasManagedModels(normalizedFormat) ? additional.includeBody : '',
+        includeBody: supportsCustomParameters(normalizedFormat) ? additional.includeBody : '',
         excludeBody: additional.excludeBody,
-        includeHeaders: hasManagedModels(normalizedFormat) ? additional.includeHeaders : '',
+        includeHeaders: supportsCustomParameters(normalizedFormat) ? additional.includeHeaders : '',
         secretId,
         proxyPreset,
         needsSecret,
@@ -1477,9 +1470,9 @@ async function collectNativeImportCandidates(authoritative) {
             name: sanitizeName(candidate.name) || '原生连接配置',
             endpoint,
             model: normalizeText(candidate.model),
-            includeBody: hasManagedModels(format) ? String(candidate.includeBody || '') : '',
-            excludeBody: hasManagedModels(format) ? String(candidate.excludeBody || '') : '',
-            includeHeaders: hasManagedModels(format) ? String(candidate.includeHeaders || '') : '',
+            includeBody: supportsCustomParameters(format) ? String(candidate.includeBody || '') : '',
+            excludeBody: supportsCustomParameters(format) ? String(candidate.excludeBody || '') : '',
+            includeHeaders: supportsCustomParameters(format) ? String(candidate.includeHeaders || '') : '',
             sourceSecretId: String(candidate.sourceSecretId || ''),
             credential,
             identity: importIdentity(format, endpoint, credential.identity, candidate.opencodeApiFormat),
@@ -1878,8 +1871,8 @@ async function copyBoundSecret() {
 
 async function addCustomModel() {
     const profile = selectedProfile();
-    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 OpenAI Compatible / OpenCode 配置。');
-    const model = await promptName('输入 Custom 模型 ID：', getEditorModel(profile.format));
+    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
+    const model = await promptName('输入模型 ID：', getEditorModel(profile.format));
     if (!model) return;
     profile.availableModels = normalizeModelList([...(profile.availableModels || []), model]);
     profile.customized = true;
@@ -1965,7 +1958,10 @@ async function fetchModelsForProfile(profile, endpoint) {
         validateOpenCodeConnection(endpoint, profile.opencodeApiFormat);
     }
     const config = FORMATS[profile.format];
-    const backendOnly = platform.preferBackendModels || profile.format === 'opencode';
+    const provider = profile.format === 'anthropic' || profile.format === 'gemini';
+    const proxy = usesProxyProfile(profile.format, endpoint) ? getBoundProxyPreset(profile) : null;
+    if (usesProxyProfile(profile.format, endpoint) && !proxy) throw new Error('代理凭据绑定缺失，请先保存配置。');
+    const backendOnly = platform.preferBackendModels || profile.format !== 'openai';
     let frontendError = null;
     if (!backendOnly) try {
         const key = profile.secretId ? await findSecretBounded(config.secretKey, profile.secretId) : '';
@@ -2012,19 +2008,19 @@ async function fetchModelsForProfile(profile, endpoint) {
             headers: getRequestHeaders(),
             body: JSON.stringify({
                 chat_completion_source: config.source,
-                reverse_proxy: '',
-                proxy_password: '',
+                reverse_proxy: provider ? endpoint : '',
+                proxy_password: proxy ? String(proxy.password || '') : '',
                 ...(profile.format === 'opencode' ? {
                     opencode_endpoint: validateOpenCodeConnection(endpoint, profile.opencodeApiFormat),
                     opencode_api_format: profile.opencodeApiFormat,
-                } : { custom_url: endpoint, custom_api_format: 'openai_compat' }),
+                } : provider ? {} : { custom_url: endpoint, custom_api_format: 'openai_compat' }),
                 custom_include_headers: profile.includeHeaders,
             }),
             cache: 'no-cache',
         }, 20000);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const models = modelIdsFromPayload(data);
-        if (!models.length) throw new Error('后端 status 响应未包含模型列表');
+        if (!models.length) throw new Error('当前宿主或服务未返回模型列表；可通过“添加”手动填写模型 ID。');
         return { models, route: backendOnly ? '后端 status' : '后端 status fallback', frontendError };
     } catch (backendError) {
         const error = new Error(`${frontendError ? `前端 /models：${frontendError.message}；` : ''}后端 status：${backendError.message}`);
@@ -2044,11 +2040,11 @@ async function fetchModelsForProfile(profile, endpoint) {
 
 async function fetchCustomModels() {
     const profile = selectedProfile();
-    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 OpenAI Compatible / OpenCode 配置。');
+    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
     if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('请先点击保存按钮保存当前 Key，再获取模型。');
     if (profile.format === 'opencode' && $('#quicker_api_opencode_format').val() !== profile.opencodeApiFormat) return toastr.info('协议已变化，请先保存配置再获取模型。');
     const editorUrl = normalizeText($('#quicker_api_url').val());
-    if (!editorUrl) return toastr.warning('请先填写 Custom URL。');
+    if (!editorUrl && profile.format === 'openai') return toastr.warning('请先填写 Custom URL。');
     if (editorUrl !== normalizeText(profile.endpoint)) return toastr.info('URL 已变化，请先保存配置；保存会清空旧远端快照并保留已选模型。');
     try {
         const result = await fetchModelsForProfile(profile, editorUrl);
@@ -2070,14 +2066,14 @@ async function fetchCustomModels() {
 
 async function manageCustomModels() {
     const profile = selectedProfile();
-    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 OpenAI Compatible / OpenCode 配置。');
+    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
     if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('Key 尚未保存，请先点击保存按钮再管理或获取模型。');
     const endpoint = normalizeText($('#quicker_api_url').val());
     if (endpoint !== normalizeText(profile.endpoint)) return toastr.info('URL 已变化，请先保存配置再管理模型。');
 
     const draft = {
         current: normalizeText(getEditorModel(profile.format) || profile.model),
-        available: normalizeModelList(profile.availableModels),
+        available: normalizeModelList([...(profile.customized ? [] : nativeProviderModels(profile.format)), ...profile.availableModels]),
         fetched: profile.fetchedFromEndpoint === endpoint ? normalizeModelList(profile.fetchedModels) : [],
         fetchedFromEndpoint: profile.fetchedFromEndpoint === endpoint ? endpoint : '',
         customized: Boolean(profile.customized),
@@ -2304,9 +2300,8 @@ function profileOptionsHtml(selected = '') {
 function modelSuggestionsForProfile(profileId = '') {
     const profile = profiles().find(item => item.id === profileId) || null;
     if (!profile) return [];
-    if (hasManagedModels(profile.format)) return normalizeModelList([profile.model, ...(profile.availableModels || [])]);
-    const native = $(FORMATS[profile.format].modelInput).find('option').map((_, option) => String(option.value || '')).get();
-    return normalizeModelList([profile.model, ...native]).filter(value => !platform.isModelAction(value));
+    return normalizeModelList([profile.model, ...(profile.availableModels || []),
+        ...(profile.customized ? [] : nativeProviderModels(profile.format))]);
 }
 
 function normalizeQuickActionPlacement(value, fallback = 'rightSendForm') {
@@ -2439,7 +2434,7 @@ async function manageQuickActions() {
         });
         fetchModels.on('click', async () => {
             const profile = selectedProfileValue();
-            if (!profile || !hasManagedModels(profile.format)) return toastr.info('请选择 OpenAI Compatible / OpenCode Profile 后拉取模型。');
+            if (!profile || !hasManagedModels(profile.format)) return toastr.info('请选择 API Profile 后拉取模型。');
             const endpoint = normalizeText(profile.endpoint);
             if (!endpoint) return toastr.warning('所选 Profile 没有可用的 Custom URL。');
             fetchModels.prop('disabled', true);
@@ -3211,7 +3206,7 @@ function configureAdditionalParametersPopup() {
     if (!excludeInput || excludeInput.dataset.quickerApiConfigured === 'true') return;
     excludeInput.dataset.quickerApiConfigured = 'true';
     const format = normalizeFormat($('#quicker_api_format').val());
-    if (hasManagedModels(format)) return;
+    if (supportsCustomParameters(format)) return;
     const root = $(excludeInput).closest('.height100p');
     root.addClass('quicker-api__exclude-only-popup');
     root.children('h3').removeAttr('data-i18n').text('排除主体参数');

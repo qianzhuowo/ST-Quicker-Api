@@ -175,7 +175,7 @@ Key 输入框支持：
 
 ## 模型列表
 
-OpenAI Compatible 和 OpenCode 配置提供：
+OpenAI Compatible、Claude（Anthropic）、Gemini 和 OpenCode 配置均提供：
 
 - **添加** — 手动添加任意模型 ID
 - **获取模型** — 从当前 API 的 `/models` 获取模型
@@ -183,7 +183,7 @@ OpenAI Compatible 和 OpenCode 配置提供：
 
 每个 API 配置都有自己独立的模型列表。切换配置时，对应的模型列表也会一起切换。
 
-SillyTavern 中优先直接访问 `/models`，失败后尝试后端；TauriTavern 直接使用后端，无需明文 Key 或浏览器跨域权限。附加请求头支持与原生编辑器一致的 YAML / JSON 对象。
+SillyTavern 的 OpenAI Compatible 优先直接访问 `/models`，失败后尝试后端；Claude、Gemini、OpenCode 以及 TauriTavern 使用后端查询，无需读取已保存 Key 的明文。远端获取取决于宿主和服务是否支持模型列表接口；部分 SillyTavern 版本不支持 Claude 模型查询，此时会明确提示失败，仍可手动添加模型。附加请求头支持与原生编辑器一致的 YAML / JSON 对象。
 
 ## 导入原生 OAI 设置
 

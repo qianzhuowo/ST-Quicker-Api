@@ -1279,3 +1279,72 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     }
 }
 
+
+/* Keep action labels horizontal; wrap whole buttons rather than characters. */
+.quicker-api .menu_button,
+.quicker-api__model-manager .menu_button {
+    white-space: nowrap;
+    word-break: normal;
+    overflow-wrap: normal;
+    flex-shrink: 0;
+}
+
+#quicker_api_model_control > select {
+    min-width: 0;
+    flex: 1 1 12rem;
+}
+
+@media (max-width: 760px) {
+    .quicker-api__model-field {
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 0.3rem;
+    }
+
+    .quicker-api__model-field > label {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    .quicker-api__model-field .quicker-api__desktop-label {
+        display: none !important;
+    }
+
+    .quicker-api__model-field .quicker-api__mobile-label {
+        display: inline !important;
+    }
+
+    #quicker_api_model_control {
+        display: contents;
+    }
+
+    #quicker_api_model_control > select {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        width: 100%;
+    }
+
+    #quicker_api_fetch_models {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    #quicker_api_add_model {
+        grid-column: 3;
+        grid-row: 1;
+        width: auto;
+        min-width: auto;
+        padding-inline: 0.4rem;
+    }
+
+    #quicker_api_manage_models {
+        grid-column: 1;
+        grid-row: 3;
+        justify-self: start;
+    }
+
+    #quicker_api_model_control > .quicker-api__manage-actions {
+        grid-column: 2 / -1;
+        grid-row: 3;
+        justify-self: end;
+    }
+}
