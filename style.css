@@ -452,6 +452,42 @@
     min-height: 2.15rem;
 }
 
+.quicker-api__model-search {
+    display: flex;
+    align-items: stretch;
+    flex-wrap: nowrap;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
+.quicker-api__model-manager .quicker-api__model-search > input,
+.quicker-api__model-manager .quicker-api__model-search > button {
+    box-sizing: border-box;
+    height: 2.4rem;
+    min-height: 2.4rem;
+    margin: 0;
+    align-self: stretch;
+}
+
+.quicker-api__model-search > input {
+    flex: 1 1 0;
+    width: 0;
+    min-width: 0;
+    max-width: 100%;
+    margin: 0;
+}
+
+.quicker-api__model-search > button {
+    flex: 0 0 auto;
+}
+
+.quicker-api__model-search-help,
+.quicker-api__model-search-count {
+    text-align: left;
+    overflow-wrap: anywhere;
+    opacity: 0.8;
+}
+
 .quicker-api__model-list {
     display: flex;
     min-height: 7rem;

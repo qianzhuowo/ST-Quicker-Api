@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { runParameterRegressions } from './parameter-regression.mjs';
 import { runCompatibilityRegressions } from './compatibility-regression.mjs';
 import { runPresetRegressions } from './preset-regression.mjs';
+import { runModelSearchRegressions } from './model-search-regression.mjs';
 
 // Run from the plugin: node tests/regression.mjs
 // Override CHROME_PATH and ST_PUBLIC_DIR when the host/browser is elsewhere.
@@ -376,6 +377,10 @@ try {
     await runParameterRegressions({ page: await newPage(), state, scopedHost, log });
     await runCompatibilityRegressions({ page: await newPage(), scopedHost, log });
     await runPresetRegressions({ page: await newPage(), state, log });
+    const modelSearchPage = await newPage();
+    await runModelSearchRegressions({ page: modelSearchPage, state, log,
+        setViewport: (width, height) => cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, modelSearchPage.sessionId),
+    });
     assert.deepEqual(exceptions, [], `Unexpected browser exceptions: ${JSON.stringify(exceptions)}`);
     console.log(`\n${passed} regression checks passed (${host}). Host APIs and account data were simulated in memory.`);
 } finally {

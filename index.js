@@ -2097,6 +2097,19 @@ async function fetchCustomModels() {
     }
 }
 
+function matchesModelSearch(model, query) {
+    const text = String(model).toLowerCase();
+    let position = 0;
+    // Ordered subsequences also include ordinary substring matches. Treat the
+    // query as literal text, not a regular expression or a wildcard pattern.
+    for (const character of normalizeText(query).toLowerCase()) {
+        position = text.indexOf(character, position);
+        if (position < 0) return false;
+        position += character.length;
+    }
+    return true;
+}
+
 async function manageCustomModels() {
     const profile = selectedProfile();
     if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
@@ -2132,9 +2145,15 @@ async function manageCustomModels() {
         $('<button type="button" class="menu_button" data-action="clear">清空</button>'),
         $('<button type="button" class="menu_button" data-action="reset">重置</button>'),
     );
+    const remoteSearch = $('<div class="quicker-api__model-search">');
+    const searchInput = $('<input class="text_pole" type="search" autocomplete="off" placeholder="搜索远端模型" aria-label="搜索远端模型">');
+    const clearSearch = $('<button type="button" class="menu_button" aria-label="清空模型搜索">清空搜索</button>');
+    const searchCount = $('<small class="quicker-api__model-search-count" role="status" aria-live="polite">');
+    remoteSearch.append(searchInput, clearSearch);
+    const searchHelp = $('<small class="quicker-api__model-search-help">').text('忽略大小写，支持部分名称或按顺序输入不连续字符；筛选时批量操作仅影响匹配项。');
     const remoteList = $('<div class="quicker-api__model-list">');
     const chosenList = $('<div class="quicker-api__model-list">');
-    remotePanel.append($('<h4><i class="fa-solid fa-cloud-arrow-down"></i> 远端模型</h4>'), remoteActions, remoteList);
+    remotePanel.append($('<h4><i class="fa-solid fa-cloud-arrow-down"></i> 远端模型</h4>'), remoteActions, remoteSearch, searchHelp, searchCount, remoteList);
     chosenPanel.append($('<h4><i class="fa-solid fa-list-check"></i> 下拉留存 / 自定义</h4>'), chosenActions, chosenList);
     columns.append(remotePanel, chosenPanel);
     content.append(columns);
@@ -2147,13 +2166,17 @@ async function manageCustomModels() {
         draft.customized = true;
         ensureCurrent();
     };
-    const renderManager = () => {
+    const filteredRemoteModels = () => draft.fetched.filter(model => matchesModelSearch(model, searchInput.val()));
+    const renderManager = ({ remoteOnly = false } = {}) => {
         ensureCurrent();
         const selected = new Set(draft.available);
         const remote = new Set(draft.fetched);
+        const matching = filteredRemoteModels();
+        searchCount.text(`显示 ${matching.length} / ${draft.fetched.length} 个模型`);
         remoteList.empty();
         if (!draft.fetched.length) remoteList.append($('<div class="quicker-api__empty-state">').text('尚无当前 URL 的远端快照'));
-        for (const model of draft.fetched) {
+        else if (!matching.length) remoteList.append($('<div class="quicker-api__empty-state">').text('没有匹配的远端模型，请尝试其他关键词或清空搜索'));
+        for (const model of matching) {
             const checkbox = $('<input type="checkbox">').prop('checked', selected.has(model)).attr('aria-label', `选择 ${model}`);
             const row = $('<div class="quicker-api__model-item quicker-api__remote-model" role="checkbox" tabindex="0">')
                 .attr('aria-checked', selected.has(model)).append(checkbox, $('<span>').text(model), $('<small>').text('远端'));
@@ -2173,6 +2196,7 @@ async function manageCustomModels() {
             remoteList.append(row);
         }
 
+        if (remoteOnly) return; // Searching must not reset an in-progress chosen-list edit.
         chosenList.empty();
         if (!draft.available.length) chosenList.append($('<div class="quicker-api__empty-state">').text('留存列表为空'));
         draft.available.forEach((model, index) => {
@@ -2238,15 +2262,16 @@ async function manageCustomModels() {
             }
             return;
         }
-        if (action === 'all') draft.available = normalizeModelList([...draft.available, ...draft.fetched]);
+        const matching = filteredRemoteModels();
+        const remote = new Set(matching);
+        if (action === 'all') draft.available = normalizeModelList([...draft.available, ...matching]);
         if (action === 'invert') {
-            const remote = new Set(draft.fetched);
             draft.available = normalizeModelList([
-                ...draft.available.filter(model => !remote.has(model) || !draft.fetched.includes(model)),
-                ...draft.fetched.filter(model => !draft.available.includes(model)),
+                ...draft.available.filter(model => !remote.has(model)),
+                ...matching.filter(model => !draft.available.includes(model)),
             ]);
         }
-        if (action === 'none') draft.available = draft.available.filter(model => !draft.fetched.includes(model) || model === draft.current);
+        if (action === 'none') draft.available = draft.available.filter(model => !remote.has(model) || model === draft.current);
         markCustomized();
         renderManager();
     });
@@ -2277,6 +2302,17 @@ async function manageCustomModels() {
             event.preventDefault();
             addDraftModel();
         }
+    });
+    searchInput.on('input', () => renderManager({ remoteOnly: true })).on('keydown', event => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            event.stopPropagation(); // Host Popup treats Enter as confirmation.
+        }
+    });
+    clearSearch.on('click', () => {
+        searchInput.val('');
+        renderManager({ remoteOnly: true });
+        searchInput.trigger('focus');
     });
     renderManager();
 
