@@ -177,3 +177,23 @@ async function switchTestPreset(name) {
     }
     await eventSource.emit(event_types.OAI_PRESET_CHANGED_AFTER);
 }
+
+// Match both hosts: import-ready, verified preset POST, register/select, then
+// native BEFORE -> connection deltas (only when enabled) -> AFTER.
+async function importTestPreset(name, preset) {
+    const data = structuredClone(preset);
+    await eventSource.emit(event_types.OAI_PRESET_IMPORT_READY, { data, presetName: name });
+    const response = await fetch('/api/presets/save', {
+        method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ apiId: 'openai', name, preset: data }),
+    });
+    if (!response.ok) return false;
+    const saved = await response.json();
+    if (Object.hasOwn(openai_setting_names, saved.name)) {
+        Object.assign(openai_settings[openai_setting_names[saved.name]], data);
+    } else {
+        openai_setting_names[saved.name] = openai_settings.push(data) - 1;
+        $('#settings_preset_openai').append($('<option>').val(openai_setting_names[saved.name]).text(saved.name));
+    }
+    await switchTestPreset(saved.name);
+    return true;
+}

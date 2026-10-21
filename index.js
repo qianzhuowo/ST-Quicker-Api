@@ -798,10 +798,10 @@ function renderProfiles(preferredId = null) {
     renderStatus();
 }
 
-function profileMatchesNative(profile) {
+function profileMatchesNative(profile, { includeModel = true } = {}) {
     const config = FORMATS[profile.format];
     if (!matchesFormat(profile.format)) return false;
-    if (String(oai_settings[config.modelField] || '') !== profile.model) return false;
+    if (includeModel && String(oai_settings[config.modelField] || '') !== profile.model) return false;
     if (nativeEndpoint(profile.format) !== profile.endpoint) return false;
     if (profile.format === 'opencode' && oai_settings.opencode_api_format !== profile.opencodeApiFormat) return false;
     if (usesProxyProfile(profile.format, profile.endpoint)) {
@@ -2927,9 +2927,28 @@ async function handleNativePresetChange() {
     const profile = profiles().find(item => item.id === profileId);
     try {
         if (!profile) {
-            settings().activeProfileId = null;
+            // Unbound imports still apply native model/connection deltas. A model
+            // change alone does not invalidate a previously verified connection,
+            // but a changed endpoint, format, proxy credential or parameters does.
+            const active = profiles().find(item => item.id === settings().activeProfileId);
+            if (!active || !profileMatchesNative(active, { includeModel: false })) {
+                settings().activeProfileId = null;
+            }
             scheduleSettingsSave();
             renderProfiles(settings().selectedProfileId);
+            // Native input events were suppressed during the transition. Read
+            // the final native model explicitly instead of the Profile default;
+            // never write a previous editor model back into an imported preset.
+            const format = Object.keys(FORMATS).find(key => isFormatSupported(key) && matchesFormat(key));
+            if (format) {
+                const selected = selectedProfile();
+                $('#quicker_api_format').val(format);
+                $('#quicker_api_url').val(nativeEndpoint(format));
+                renderOpenCodeFields(null, format);
+                renderModelControl(selected?.format === format ? selected : null, String(oai_settings[FORMATS[format].modelField] || ''));
+                editorModelBaseline = getEditorModel(format);
+                updateCredentialEditor(settings().activeProfileId === selected?.id ? selected : null);
+            }
             setStatus('当前 preset 未绑定。', 'warning');
             return false;
         }
