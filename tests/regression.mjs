@@ -93,8 +93,13 @@ const server = createServer(async (req, res) => {
                 if (body.preset?.custom_model === state.delayedModel) await new Promise(resolve => setTimeout(resolve, 180));
                 res.end(JSON.stringify({ name: body.name })); return;
             case '/api/secrets/read':
-                res.end(JSON.stringify(Object.fromEntries(['api_key_custom', 'api_key_claude', 'api_key_makersuite'].map(key => [key, [{ id: 'test-secret', active: true }]])))); return;
-            case '/api/secrets/rotate': res.end('{}'); return;
+                res.end(JSON.stringify(state.secrets || Object.fromEntries(['api_key_custom', 'api_key_claude', 'api_key_makersuite'].map(key => [key, [{ id: 'test-secret', active: true }]])))); return;
+            case '/api/secrets/rotate':
+                if (state.failNextRotation) { state.failNextRotation = false; res.writeHead(500).end('{}'); return; }
+                if (state.secrets?.[body.key]) {
+                    for (const entry of state.secrets[body.key]) entry.active = entry.id === body.id;
+                }
+                res.end('{}'); return;
             default: res.writeHead(404).end('{}');
         }
     } catch (error) { res.writeHead(500).end(JSON.stringify({ error: String(error) })); }

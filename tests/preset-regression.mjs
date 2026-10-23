@@ -46,7 +46,7 @@ export async function runPresetRegressions({ page, state, log }) {
         ...structuredClone(oai_settings), custom_model:'foreign-model', custom_url:'https://foreign.invalid/v1'
     })`);
     assert.deepEqual(await run(`[settings().activeProfileId, getEditorModel(), oai_settings.custom_model]`),
-        [null, 'foreign-model', 'foreign-model']);
+        [null, 'chosen-model', 'foreign-model']);
     await run(`document.getElementById('update_oai_preset').click()`);
     assert.equal(await run(`nativePresetSaveIntent`), null);
     assert.equal(await run(`settings().presetBindings['Foreign-connection']`), undefined);
@@ -61,11 +61,82 @@ export async function runPresetRegressions({ page, state, log }) {
             });
         })()`);
         assert.deepEqual(await run(`[settings().activeProfileId, $('#quicker_api_format').val(), getEditorModel(), editorModelBaseline, $('#quicker_api_url').val()]`),
-            [null, format, 'imported-provider-model', 'imported-provider-model', '']);
+            [null, 'openai', 'profile-default', 'profile-default', 'https://import.invalid/v1']);
         await run(`document.getElementById('update_oai_preset').click()`);
         assert.equal(await run('nativePresetSaveIntent'), null);
         assert.equal(await run(`settings().presetBindings[${JSON.stringify('Imported-' + source)}]`), undefined);
-        log(`cross-source import displays native ${format} model without applying or binding the previous Profile`);
+        log(`cross-source ${format} import preserves the selected Profile editor without applying or binding it`);
     }
+    // Delete the binding, fall back to native defaults, then import a preset
+    // without connection fields. Neither the editor nor a subsequent API save
+    // may adopt those defaults under the selected Profile's name.
+    await run(`(async () => {
+        await applyProfileById(importProfile.id);
+        settings().presetBindings['Deleted'] = importProfile.id;
+        handlePresetDeleted({apiId:'openai', name:'Deleted'});
+        await importTestPreset('Native fallback', {
+            ...structuredClone(oai_settings), custom_url:'https://native-default.invalid/v1', custom_model:'native-default'
+        });
+        await importTestPreset('No connection fields', {temperature:0.8});
+        // Late host model notifications must not overwrite an inactive Profile.
+        handleNativeModelChange();
+    })()`);
+    assert.deepEqual(await run(`[settings().activeProfileId, $('#quicker_api_url').val(), getEditorModel(), $('#quicker_api_key_input').attr('placeholder')]`),
+        [null, 'https://import.invalid/v1', 'profile-default', '已配置密钥（点击眼睛查看）']);
+    await run('saveSelectedProfile()');
+    assert.deepEqual(await run(`[importProfile.endpoint, importProfile.model, importProfile.secretId]`),
+        ['https://import.invalid/v1', 'profile-default', 'test-secret']);
+    log('delete → fallback → import without connection fields → save preserves Profile URL/model/secret');
+
+    // Saving must apply the full connection, not merely stamp activeProfileId.
+    state.secrets = { api_key_custom: [{id:'native-secret',active:true}, {id:'test-secret',active:false}] };
+    await run(`(async () => {
+        $('#chat_completion_source').append($('<option>').val('openai').text('OpenAI'));
+        await importTestPreset('OpenAI fallback', {
+            ...structuredClone(oai_settings), chat_completion_source:'openai',
+            custom_url:'https://native-default.invalid/v1', custom_model:'native-default'
+        });
+        $('#quicker_api_url').val('https://edited-profile.invalid/v1');
+        renderModelControl(importProfile, 'edited-model');
+        messages.length = 0;
+    })()`);
+    state.failNextRotation = true;
+    await run('enqueueOperation(saveSelectedProfile)');
+    assert.deepEqual(await run(`[settings().activeProfileId, oai_settings.chat_completion_source, oai_settings.custom_url, oai_settings.custom_model, getActiveSecret(SECRET_KEYS.CUSTOM)?.id]`),
+        [null, 'openai', 'https://native-default.invalid/v1', 'native-default', 'native-secret']);
+    assert.equal(await run(`settings().presetBindings['OpenAI fallback']`), undefined);
+    assert.equal(await run(`messages.some(m=>m.level==='success')`), false);
+    assert.equal(await run(`$('#quicker_api_status').text().includes('已保存并安全应用')`), false);
+    assert.deepEqual(await run(`[importProfile.endpoint,importProfile.model]`), ['https://edited-profile.invalid/v1', 'edited-model']);
+    log('failed save application retains saved edits but preserves native connection/key and does not claim active or bind preset');
+    await run('enqueueOperation(saveSelectedProfile)');
+    assert.deepEqual(await run(`[settings().activeProfileId, oai_settings.chat_completion_source, $('#chat_completion_source').val(), oai_settings.custom_url, oai_settings.custom_model, getActiveSecret(SECRET_KEYS.CUSTOM)?.id]`),
+        ['import-profile','custom','custom','https://edited-profile.invalid/v1','edited-model','test-secret']);
+    assert.equal(await run(`settings().presetBindings['OpenAI fallback']`), 'import-profile');
+    assert.equal(await run(`$('#quicker_api_status').text()`), '已保存并安全应用。');
+    log('saving after OpenAI fallback immediately applies Custom source, edited URL/model and bound key without reload');
+    await run(`oai_settings.chat_completion_source='openai'; renderStatus()`);
+    assert.equal(await run(`$('#quicker_api_status').text().includes('已保存并安全应用')`), false);
+    log('status does not trust a stale active Profile marker when native source diverges');
+    delete state.secrets;
+    await run(`importProfile.endpoint='https://import.invalid/v1'; importProfile.model='profile-default'`);
+
+    await run(`(async () => {
+        await applyProfileById(importProfile.id);
+        $('#quicker_api_url').val('https://draft.invalid/v1');
+        renderModelControl(importProfile, 'draft-model');
+        $('#quicker_api_key_input').val('fixture-draft-key').trigger('input');
+        settings().presetBindings['Deleted draft'] = importProfile.id;
+        handlePresetDeleted({apiId:'openai', name:'Deleted draft'});
+        await switchTestPreset('Native fallback');
+    })()`);
+    assert.deepEqual(await run(`[$('#quicker_api_url').val(), getEditorModel(), $('#quicker_api_key_input').val(), keyEditorDirty]`),
+        ['https://draft.invalid/v1', 'draft-model', 'fixture-draft-key', true]);
+    log('deleting and switching unbound presets preserves unsaved URL/model/key drafts');
+
+    await run(`settings().selectedProfileId = null; renderProfiles(); switchTestPreset('Native fallback')`);
+    assert.deepEqual(await run(`[$('#quicker_api_url').val(), getEditorModel()]`),
+        ['https://native-default.invalid/v1', 'native-default']);
+    log('without a selected Profile, native connection values still populate the editor');
     await run('persistSettingsNow(); teardownQuickerApi()');
 }

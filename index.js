@@ -717,22 +717,11 @@ function handleNativeModelChange() {
     if (syncingEditorModel || extensionDisabled || teardownPending || presetTransitionBlocked || pendingOperations) return;
     const format = normalizeFormat($('#quicker_api_format').val());
     if (!matchesFormat(format)) return;
+    const profile = selectedProfile();
+    if (profile && (settings().activeProfileId !== profile.id || !profileMatchesNative(profile, { includeModel: false }))) return;
     // Keep the panel aligned with changes made by native controls/other extensions.
     renderModelControl(selectedProfile(), String(oai_settings[FORMATS[format].modelField] || ''));
     renderStatus();
-}
-
-function syncEditorConnectionToNative() {
-    const format = normalizeFormat($('#quicker_api_format').val());
-    const config = FORMATS[format];
-    const endpoint = editorEndpoint(format);
-    if (format === 'opencode') {
-        oai_settings.opencode_api_format = String($('#quicker_api_opencode_format').val());
-        $('#opencode_api_format').val(oai_settings.opencode_api_format).trigger('input');
-    }
-    oai_settings[config.endpointField] = endpoint;
-    $(config.endpointInput).val(endpoint).trigger('input');
-    syncEditorModelToNative();
 }
 
 function nativeAdditionalParameters(source) {
@@ -843,6 +832,10 @@ function renderStatus(extraMessage = '') {
         if (blockedMessage) return setStatus('安全阻断：凭据状态无法确认。', 'warning');
         if (settings().activeProfileId !== profile.id) return setStatus(extraMessage || '所选 Profile 未应用。', 'warning');
         if (editorHasUnsavedChanges(profile)) return setStatus('当前修改尚未保存。', 'warning');
+        if (!profileMatchesNative(profile, { includeModel: false })
+            || (!proxyMode && getActiveSecret(FORMATS[profile.format].secretKey)?.id !== profile.secretId)) {
+            return setStatus('原生连接与所选 Profile 不一致，请重新应用。', 'warning');
+        }
         if (presetName && settings().presetBindings[presetName] !== profile.id) return setStatus('当前 preset 未绑定到所选 Profile。', 'warning');
         if (!profileHasCredential(profile, profile.format, profile.endpoint)) return setStatus('当前 Profile 凭据为空。', 'warning');
         return setStatus('已保存并安全应用。');
@@ -1262,11 +1255,11 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
     }
 }
 
-function captureNativeProfile(name, format, existing = {}) {
+function captureNativeProfile(name, format, existing = {}, connection = {}) {
     const normalizedFormat = normalizeFormat(format);
     const config = FORMATS[normalizedFormat];
     const additional = nativeAdditionalParameters(isCustomFormat(normalizedFormat) ? platform.customSelection(config.apiFormat) : config.source);
-    const endpoint = nativeEndpoint(normalizedFormat);
+    const endpoint = connection.endpoint ?? nativeEndpoint(normalizedFormat);
     const proxyMode = usesProxyProfile(normalizedFormat, endpoint);
     const activeSecret = getActiveSecret(config.secretKey);
     const retainedSecretId = existing.format === normalizedFormat ? String(existing.secretId || '') : '';
@@ -1275,14 +1268,14 @@ function captureNativeProfile(name, format, existing = {}) {
     const profileName = name || existing.name;
     const profileId = existing.id || makeId();
     const proxyPreset = proxyMode
-        ? ensureBoundProxyPreset(profileName, endpoint, String(oai_settings.proxy_password || ''), existing.proxyPreset, profileId)
+        ? ensureBoundProxyPreset(profileName, endpoint, String(connection.proxyPassword ?? oai_settings.proxy_password ?? ''), existing.proxyPreset, profileId)
         : '';
     return normalizeProfile({
         ...existing,
         id: profileId,
         name: uniqueName(profileName, existing.id),
         format: normalizedFormat,
-        opencodeApiFormat: normalizedFormat === 'opencode' ? oai_settings.opencode_api_format : '',
+        opencodeApiFormat: normalizedFormat === 'opencode' ? (connection.opencodeApiFormat ?? oai_settings.opencode_api_format) : '',
         endpoint,
         model: getEditorModel(normalizedFormat),
         includeBody: supportsCustomParameters(normalizedFormat) ? additional.includeBody : '',
@@ -1712,9 +1705,15 @@ async function saveSelectedProfile() {
         if (!await saveAndBindInputKey(credentialDraft, format, editorUrl)) return;
         captureBase = credentialDraft;
     }
-    syncEditorConnectionToNative();
-    $('#quicker_api_url').val(editorUrl);
-    Object.assign(current, captureNativeProfile(current.name, format, captureBase));
+    // Capture the editor without changing the live connection first: applyProfile
+    // must snapshot the original source/fields for credential verification/rollback.
+    const retainedProxy = proxyMode && captureBase.format === format
+        && normalizeText(captureBase.endpoint) === editorUrl ? getBoundProxyPreset(captureBase) : null;
+    Object.assign(current, captureNativeProfile(current.name, format, captureBase, {
+        endpoint: editorUrl,
+        opencodeApiFormat: String($('#quicker_api_opencode_format').val() || ''),
+        proxyPassword: keyValue || retainedProxy?.password,
+    }));
     if (hasManagedModels(format)) {
         current.availableModels = normalizeModelList([...(current.availableModels || []), current.model]);
         if (!isNew && previousEndpoint !== normalizeText(current.endpoint)) {
@@ -1726,15 +1725,25 @@ async function saveSelectedProfile() {
     }
     if (isNew) profiles().push(current);
     settings().selectedProfileId = current.id;
-    settings().activeProfileId = current.id;
+    // Saving data is not proof that its source and credential are active.
+    settings().activeProfileId = null;
+    let applied = false;
+    try {
+        applied = await applyProfile(current);
+    } catch (error) {
+        console.error('[QuickerApi] Saved Profile application failed:', error);
+    }
     const presetName = currentPresetName();
-    if (presetName) {
+    if (applied && presetName) {
         settings().presetBindings[presetName] = current.id;
         settings().presetModels[presetName] = presetModelSnapshot(current, current.model);
     }
     scheduleSettingsSave();
     renderProfiles(current.id);
-    if (await persistSettingsNow()) toastr.success('API 配置已保存到 SillyTavern。');
+    if (await persistSettingsNow()) {
+        if (applied) toastr.success('API 配置已保存并应用到 SillyTavern。');
+        else toastr.warning('API 配置已保存，但未能应用；请检查连接与密钥状态后重新选择该 Profile。');
+    }
 }
 
 async function renameSelectedProfile() {
@@ -2971,6 +2980,17 @@ async function handleNativePresetChange() {
                 settings().activeProfileId = null;
             }
             scheduleSettingsSave();
+            const selected = selectedProfile();
+            // A selected Profile owns its editor, including unsaved URL/key/model
+            // drafts. An unrelated native preset must not become its save input.
+            if (selected) {
+                if (settings().activeProfileId === selected.id) {
+                    renderModelControl(selected, String(oai_settings[FORMATS[selected.format].modelField] || ''));
+                    editorModelBaseline = getEditorModel(selected.format);
+                }
+                renderStatus();
+                return false;
+            }
             renderProfiles(settings().selectedProfileId);
             // Native input events were suppressed during the transition. Read
             // the final native model explicitly instead of the Profile default;
@@ -3019,7 +3039,8 @@ function handlePresetDeleted({ apiId, name } = {}) {
     delete settings().presetBindings[name];
     delete settings().presetModels[name];
     scheduleSettingsSave();
-    renderProfiles(settings().selectedProfileId);
+    // Removing a binding does not change the selected Profile or its draft.
+    renderStatus();
 }
 
 function restoreBoundPresetModel(name, profile) {
@@ -3271,6 +3292,8 @@ function bindEvents() {
     $('#chat_completion_source').on('change.quickerApi', function () {
         platform.syncParameterEditors();
         updatePanelVisibility();
+        // Preset-driven source changes are reconciled by the AFTER handler.
+        if (presetTransitionBlocked) return;
         const entry = Object.entries(FORMATS).find(([format]) => isFormatSupported(format) && matchesFormat(format));
         if (!entry) return;
         $('#quicker_api_format').val(entry[0]);
