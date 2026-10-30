@@ -15,6 +15,13 @@ const MODULE_NAME = 'quickerApi';
 const LEGACY_MODULE_NAME = 'customOpenAIProfiles';
 const SCHEMA_VERSION = 15;
 const PANEL_COLLAPSED_STORAGE_KEY = 'quickerApi.panelCollapsed';
+const MODEL_PICKER_LAYOUT_STORAGE_KEY = 'quickerApi.modelPickerLayout';
+// Dropdown option layouts. "compact" is desktop-only; phones show it as normal.
+const MODEL_PICKER_LAYOUTS = {
+    normal: { label: '普通', icon: 'fa-table-cells-large' },
+    compact: { label: '紧凑', icon: 'fa-table-cells' },
+    single: { label: '单行', icon: 'fa-list' },
+};
 const EMPTY_SECRET_LABEL = 'Quicker Api · No key';
 const BUILTIN_QUICK_URLS = Object.freeze([
     { name: 'OpenAI', url: 'https://api.openai.com/v1' },
@@ -810,6 +817,7 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
                 <input class="text_pole quicker-api__model-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索或输入新模型 ID" aria-label="搜索模型" aria-controls="quicker_api_model_options">
                 <button type="button" class="menu_button quicker-api__model-icon-button" data-model-picker-action="add" title="添加模型" aria-label="添加模型"><i class="fa-solid fa-plus"></i></button>
                 <button type="button" class="menu_button quicker-api__model-icon-button" data-model-picker-action="fetch" title="获取模型" aria-label="获取模型"><i class="fa-solid fa-arrows-rotate"></i></button>
+                <button type="button" class="menu_button quicker-api__model-icon-button" data-model-picker-action="layout"><i class="fa-solid"></i></button>
             </div>
             <div id="quicker_api_model_options" class="quicker-api__model-options" role="listbox" aria-label="模型"></div>
         </div>
@@ -852,6 +860,65 @@ function modelPickerDropdown() {
 
 let modelPickerColumns = 1;
 let modelPickerPositionFrame = 0;
+let modelPickerLayout = null;
+
+function readModelPickerLayout() {
+    if (modelPickerLayout) return modelPickerLayout;
+    let stored = null;
+    try {
+        stored = globalThis.localStorage.getItem(MODEL_PICKER_LAYOUT_STORAGE_KEY);
+    } catch {
+        // Storage may be blocked; the layout then lasts for this page only.
+    }
+    modelPickerLayout = Object.hasOwn(MODEL_PICKER_LAYOUTS, stored) ? stored : 'normal';
+    return modelPickerLayout;
+}
+
+function isNarrowModelPicker() {
+    return (globalThis.visualViewport?.width || window.innerWidth) <= 760;
+}
+
+// The layout that actually applies: phones have no compact layout.
+function effectiveModelPickerLayout() {
+    const layout = readModelPickerLayout();
+    return layout === 'compact' && isNarrowModelPicker() ? 'normal' : layout;
+}
+
+function cycleModelPickerLayout() {
+    const order = isNarrowModelPicker() ? ['normal', 'single'] : ['normal', 'compact', 'single'];
+    const current = effectiveModelPickerLayout();
+    modelPickerLayout = order[(order.indexOf(current) + 1) % order.length];
+    try {
+        globalThis.localStorage.setItem(MODEL_PICKER_LAYOUT_STORAGE_KEY, modelPickerLayout);
+    } catch {
+        // Keep the in-memory choice.
+    }
+    positionModelPicker();
+}
+
+function applyModelPickerLayout(dropdown) {
+    const layout = effectiveModelPickerLayout();
+    const narrow = isNarrowModelPicker();
+    modelPickerColumns = layout === 'single' ? 1 : layout === 'compact' ? 4 : narrow ? 2 : 3;
+    dropdown.style.setProperty('--quicker-api-model-columns', String(modelPickerColumns));
+    dropdown.dataset.layout = layout;
+    const order = narrow ? ['normal', 'single'] : ['normal', 'compact', 'single'];
+    const next = MODEL_PICKER_LAYOUTS[order[(order.indexOf(layout) + 1) % order.length]];
+    const button = dropdown.querySelector('[data-model-picker-action="layout"]');
+    if (!button) return;
+    const label = `展示形式：${MODEL_PICKER_LAYOUTS[layout].label}（点击切换为${next.label}）`;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.firstElementChild.className = `fa-solid ${MODEL_PICKER_LAYOUTS[layout].icon}`;
+}
+
+// The area of the layout viewport the user can actually see, in client coordinates.
+function visibleViewportRect() {
+    const viewport = globalThis.visualViewport;
+    const top = viewport?.offsetTop ?? 0;
+    const left = viewport?.offsetLeft ?? 0;
+    return { top, left, bottom: top + (viewport?.height || window.innerHeight), right: left + (viewport?.width || window.innerWidth) };
+}
 
 function positionModelPicker() {
     modelPickerPositionFrame = 0;
@@ -859,31 +926,34 @@ function positionModelPicker() {
     const trigger = document.getElementById('quicker_api_model_trigger');
     if (!dropdown || dropdown.hidden || !trigger) return;
     const rect = trigger.getBoundingClientRect();
-    const viewportWidth = globalThis.visualViewport?.width || window.innerWidth;
-    const viewportHeight = globalThis.visualViewport?.height || window.innerHeight;
+    const view = visibleViewportRect();
     // The trigger was hidden (drawer closed) or scrolled fully out of view.
-    if ((!rect.width && !rect.height) || rect.bottom < 0 || rect.top > viewportHeight) return closeModelPicker();
+    if ((!rect.width && !rect.height) || rect.bottom < view.top || rect.top > view.bottom) return closeModelPicker();
+    applyModelPickerLayout(dropdown);
     const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
     const margin = 8;
     const gap = 4;
-    const width = Math.min(viewportWidth - margin * 2, Math.max(rect.width, 40 * rem));
-    const left = Math.max(margin, Math.min(rect.left, viewportWidth - margin - width));
-    const below = viewportHeight - rect.bottom - gap - margin;
-    const above = rect.top - gap - margin;
+    const width = Math.min(view.right - view.left - margin * 2, Math.max(rect.width, 40 * rem));
+    const left = Math.max(view.left + margin, Math.min(rect.left, view.right - margin - width));
+    const below = view.bottom - rect.bottom - gap - margin;
+    const above = rect.top - view.top - gap - margin;
     const placeAbove = below < 15 * rem && above > below;
-    const maxHeight = Math.max(10 * rem, Math.min(30 * rem, placeAbove ? above : below));
-    Object.assign(dropdown.style, {
-        left: `${left}px`,
-        width: `${width}px`,
-        maxHeight: `${maxHeight}px`,
-        top: placeAbove ? '' : `${rect.bottom + gap}px`,
-        bottom: placeAbove ? `${viewportHeight - rect.top + gap}px` : '',
-    });
+    // Never taller than the visible space on the chosen side.
+    const maxHeight = Math.max(6 * rem, Math.min(30 * rem, placeAbove ? above : below, view.bottom - view.top - margin * 2));
+    Object.assign(dropdown.style, { left: `${left}px`, top: '0px', bottom: '', width: `${width}px`, maxHeight: `${maxHeight}px` });
+    const height = dropdown.getBoundingClientRect().height;
+    const wanted = placeAbove ? rect.top - gap - height : rect.bottom + gap;
+    const top = Math.max(view.top + margin, Math.min(wanted, view.bottom - margin - height));
+    dropdown.style.top = `${top}px`;
+    // `position: fixed` is not always relative to the viewport (a transformed,
+    // filtered or zoomed ancestor, or mobile browser chrome can shift it).
+    // Measure where it really landed and correct by the difference.
+    const placed = dropdown.getBoundingClientRect();
+    const dx = left - placed.left;
+    const dy = top - placed.top;
+    if (Math.abs(dx) > 0.5) dropdown.style.left = `${left + dx}px`;
+    if (Math.abs(dy) > 0.5) dropdown.style.top = `${top + dy}px`;
     dropdown.classList.toggle('is-above', placeAbove);
-    // 2 columns on phones, 3 on wide phones/tablets, 4 on desktop. Always
-    // written: the dropdown element is recreated whenever the panel re-renders.
-    modelPickerColumns = Math.max(1, Math.min(4, Math.floor((width - 0.9 * rem) / (8 * rem))));
-    dropdown.style.setProperty('--quicker-api-model-columns', String(modelPickerColumns));
 }
 
 function scheduleModelPickerPosition(event) {
@@ -991,6 +1061,8 @@ function renderModelPickerOptions() {
     picker.find('[data-model-picker-action="fetch"]').attr({ title: fetchLabel, 'aria-label': fetchLabel });
     const options = list.children('.quicker-api__model-option');
     const selectedIndex = options.toArray().findIndex(option => option.classList.contains('is-selected'));
+    // Content height changed: re-place it (an upward list must stay anchored to the trigger).
+    positionModelPicker();
     setModelPickerActive(selectedIndex >= 0 && !query ? selectedIndex : 0, { scroll: true });
 }
 
@@ -1101,6 +1173,9 @@ function bindModelPickerEvents() {
         if (this.dataset.modelPickerAction === 'add') {
             closeModelPicker();
             void addCustomModel(query || '');
+        } else if (this.dataset.modelPickerAction === 'layout') {
+            cycleModelPickerLayout();
+            setModelPickerActive(modelPickerDropdown().find('.quicker-api__model-option.is-active').index(), { scroll: true });
         } else {
             void enqueueOperation(fetchCustomModels);
         }

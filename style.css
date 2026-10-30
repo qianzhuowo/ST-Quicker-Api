@@ -987,6 +987,16 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
     overscroll-behavior: contain;
 }
 
+/* Compact (desktop only): 4 columns with tighter rows. */
+.quicker-api__model-dropdown[data-layout="compact"] .quicker-api__model-options {
+    gap: 0.2rem;
+}
+
+.quicker-api__model-dropdown[data-layout="compact"] .quicker-api__model-option {
+    padding-block: 0.1rem;
+    font-size: 0.9em;
+}
+
 .quicker-api__quick-item {
     display: grid;
     min-width: 0;

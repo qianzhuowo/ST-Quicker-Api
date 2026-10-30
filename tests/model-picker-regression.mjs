@@ -221,8 +221,8 @@ export async function runModelPickerRegressions({ page, log, setViewport }) {
     log('the manager flags stale favorites, cleans them in one click, and only saves on confirm');
 
     // 5. Layout of the open picker: a fixed overlay (never stretches the host
-    // panel), flips above when there is no room below, 2 columns on phones.
-    for (const [width, columns] of [[320, '2'], [768, '4'], [1280, '4']]) {
+    // panel), flips above when there is no room below, 2 columns on phones / 3 on desktop.
+    for (const [width, columns] of [[320, '2'], [768, '3'], [1280, '3']]) {
         await setViewport(width, 700);
         const before = await run(`(() => { const out=[]; for (let n=document.getElementById('quicker_api_model_trigger'); n; n=n.parentElement) out.push(n.scrollHeight); return out; })()`);
         await open();
@@ -247,6 +247,63 @@ export async function runModelPickerRegressions({ page, log, setViewport }) {
         await run('closeModelPicker()');
         assert.equal(await run(`document.getElementById('quicker_api').contains(document.getElementById('quicker_api_model_dropdown')) && !document.getElementById('quicker_api_model_portal')`), true);
     }
-    log('the open picker is a fixed overlay: inside the viewport, never stretches the panel, 2 columns on phones and 4 on desktop');
+    log('the open picker is a fixed overlay: inside the viewport, never stretches the panel, 2 columns on phones and 3 on desktop');
+
+    // 6. Layout switch next to fetch: normal -> compact -> single on desktop; phones skip compact.
+    await run(`localStorage.removeItem('quickerApi.modelPickerLayout'); true`);
+    const layoutState = () => run(`(() => { const d=document.getElementById('quicker_api_model_dropdown'); const b=d.querySelector('[data-model-picker-action="layout"]');
+        return [d.dataset.layout, getComputedStyle(d).getPropertyValue('--quicker-api-model-columns').trim(), localStorage.getItem('quickerApi.modelPickerLayout'), b.getAttribute('aria-label')]; })()`);
+    const cycle = () => run(`$('#quicker_api_model_dropdown [data-model-picker-action="layout"]').trigger('click'); true`);
+    await setViewport(1280, 700);
+    await open();
+    assert.deepEqual((await layoutState()).slice(0, 3), ['normal', '3', null]);
+    assert.match((await layoutState())[3], /普通.*切换为紧凑/);
+    await cycle();
+    assert.deepEqual((await layoutState()).slice(0, 3), ['compact', '4', 'compact']);
+    await cycle();
+    assert.deepEqual((await layoutState()).slice(0, 3), ['single', '1', 'single']);
+    assert.equal(await run(`(() => { const o=[...document.querySelectorAll('.quicker-api__model-option')]; return o.length>1 && o.every(x=>Math.abs(x.getBoundingClientRect().width-o[0].getBoundingClientRect().width)<1) && new Set(o.map(x=>Math.round(x.getBoundingClientRect().left))).size===1; })()`), true, 'single layout puts one model per row');
+    assert.equal(await run(`!document.getElementById('quicker_api_model_dropdown').hidden`), true, 'switching layout keeps the dropdown open');
+    await cycle();
+    assert.deepEqual((await layoutState()).slice(0, 3), ['normal', '3', 'normal']);
+    await cycle();
+    await run('closeModelPicker()');
+    await setViewport(320, 700);
+    await open();
+    assert.deepEqual((await layoutState()).slice(0, 3), ['normal', '2', 'compact'], 'a stored compact layout shows as normal on phones');
+    await cycle();
+    assert.deepEqual((await layoutState()).slice(0, 3), ['single', '1', 'single']);
+    await cycle();
+    assert.deepEqual((await layoutState()).slice(0, 3), ['normal', '2', 'normal']);
+    await run('closeModelPicker()');
+    log('the layout switch cycles normal/compact/single on desktop and normal/single on phones, and persists');
+
+    // 7. Phones: the dropdown is fully visible next to the trigger wherever the trigger sits,
+    // even when `position: fixed` is not relative to the viewport (filtered, offset <body>).
+    await setViewport(360, 560);
+    const placement = async (y, hostShift = false) => {
+        await run(`(() => {
+            const control=document.getElementById('quicker_api_model_trigger'); control.style.transform='';
+            document.body.style.filter=${hostShift ? "'opacity(1)'" : "''"}; document.body.style.marginTop=${hostShift ? "'37px'" : "''"};
+            const r=document.getElementById('quicker_api_model_trigger').getBoundingClientRect();
+            control.style.transform='translateY(' + (${y} - r.top) + 'px)'; return true; })()`);
+        await open();
+        const result = await run(`(() => {
+            const t=document.getElementById('quicker_api_model_trigger').getBoundingClientRect();
+            const d=document.getElementById('quicker_api_model_dropdown').getBoundingClientRect();
+            const above=d.bottom<=t.top+1, below=d.top>=t.bottom-1;
+            const gap=above ? t.top-d.bottom : d.top-t.bottom;
+            return { visible: d.top>=0 && d.bottom<=innerHeight+0.5 && d.left>=0 && d.right<=innerWidth+0.5 && d.height>=80,
+                adjacent: (above || below) && gap>=0 && gap<=6, above, trigger:[Math.round(t.top),Math.round(t.bottom)], dropdown:[Math.round(d.top),Math.round(d.bottom)] }; })()`);
+        await run('closeModelPicker()');
+        return result;
+    };
+    for (const [label, y, shift] of [['top', 6, false], ['bottom', 520, false], ['top (shifted host)', 50, true], ['bottom (shifted host)', 520, true]]) {
+        const result = await placement(y, shift);
+        assert.ok(result.visible && result.adjacent, `${label}: ${JSON.stringify(result)}`);
+        assert.equal(result.above, /bottom/.test(label), `${label} opens ${/bottom/.test(label) ? 'above' : 'below'}: ${JSON.stringify(result)}`);
+    }
+    await run(`document.getElementById('quicker_api_model_trigger').style.transform=''; document.body.style.filter=''; document.body.style.marginTop=''; true`);
+    log('on phones the dropdown stays fully visible and attached to the trigger near the top and bottom, even with a shifted fixed-position host');
     await run('teardownQuickerApi()');
 }
