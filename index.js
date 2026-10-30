@@ -2566,11 +2566,28 @@ async function manageCustomModels() {
     };
     const initialDraft = structuredClone(draft);
 
-    const content = $('<div class="quicker-api__model-manager">');
+    const content = $('<div class="quicker-api__model-manager quicker-api__model-manager--paged">');
     content.append($('<div class="quicker-api__manager-note">').text('所有修改仅在确认后保存，取消会完整回滚。'));
+    // Narrow screens show one panel at a time behind these tabs (no page scrolling needed).
+    const pageTabs = $(`<div class="quicker-api__manager-pages" role="tablist" aria-label="管理页面">
+        <button type="button" role="tab" class="menu_button" data-page="remote"><i class="fa-solid fa-cloud-arrow-down"></i><span>远端模型</span><small></small></button>
+        <button type="button" role="tab" class="menu_button" data-page="chosen"><i class="fa-solid fa-star"></i><span>收藏</span><small></small></button>
+    </div>`);
     const columns = $('<div class="quicker-api__manager-columns">');
-    const remotePanel = $('<section class="quicker-api__manager-panel">');
-    const chosenPanel = $('<section class="quicker-api__manager-panel">');
+    const remotePanel = $('<section class="quicker-api__manager-panel" data-page="remote" role="tabpanel">');
+    const chosenPanel = $('<section class="quicker-api__manager-panel" data-page="chosen" role="tabpanel">');
+    const showPage = page => {
+        content.attr('data-page', page);
+        pageTabs.find('[data-page]').each((_, tab) => {
+            const active = tab.dataset.page === page;
+            tab.classList.toggle('is-active', active);
+            tab.setAttribute('aria-selected', String(active));
+        });
+    };
+    pageTabs.on('click', '[data-page]', function () {
+        showPage(this.dataset.page);
+    });
+    showPage('remote');
     const remoteActions = $('<div class="quicker-api__manager-actions">').append(
         $('<button type="button" class="menu_button" data-action="fetch"><i class="fa-solid fa-arrows-rotate"></i><span>获取</span></button>'),
         $('<button type="button" class="menu_button" data-action="all">全选</button>'),
@@ -2599,7 +2616,7 @@ async function manageCustomModels() {
     remotePanel.append($('<h4><i class="fa-solid fa-cloud-arrow-down"></i> 远端模型（勾选 = 收藏）</h4>'), remoteActions, remoteSearch, searchHelp, searchCount, remoteList);
     chosenPanel.append(chosenTitle, chosenActions, chosenList);
     columns.append(remotePanel, chosenPanel);
-    content.append(columns);
+    content.append(pageTabs, columns);
 
     const normalizeDraft = () => {
         draft.available = normalizeModelList(draft.available);
@@ -2748,6 +2765,9 @@ async function manageCustomModels() {
             if (entry.row === cursor) cursor = cursor.nextSibling;
             else chosenList[0].insertBefore(entry.row, cursor);
         });
+        pageTabs.find('[data-page="remote"] small').text(String(draft.fetched.length));
+        pageTabs.find('[data-page="chosen"] small').text(stale.size ? `${draft.available.length} · ⚠${stale.size}` : String(draft.available.length));
+        pageTabs.find('[data-page="chosen"]').toggleClass('has-stale', stale.size > 0);
     };
     // A draft edit: only the checkboxes and the (short) favorites list change.
     const updateDraft = () => {

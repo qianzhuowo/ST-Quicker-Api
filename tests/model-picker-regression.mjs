@@ -220,6 +220,42 @@ export async function runModelPickerRegressions({ page, log, setViewport }) {
     assert.equal(await run(`$('#quicker_api_custom_model').val()`), 'fav-a');
     log('the manager flags stale favorites, cleans them in one click, and only saves on confirm');
 
+    // Phones: the manager is paged by two tabs instead of a scrolling column.
+    await run(`pickerProfile.fetchedModels=Array.from({length:80},(_,i)=>'bulk-'+i); pickerProfile.fetchedFromEndpoint=pickerProfile.endpoint; true`);
+    const pages = () => run(`(() => {
+        const m=document.querySelector('.quicker-api__model-manager--paged'); const vis=e=>!!e && e.getClientRects().length>0;
+        const panel=p=>m.querySelector('.quicker-api__manager-panel[data-page="'+p+'"]');
+        let scrolls=[]; for (let n=m; n && n!==document.documentElement; n=n.parentElement) { const s=getComputedStyle(n).overflowY; if (/auto|scroll/.test(s) && n.scrollHeight>n.clientHeight+1) scrolls.push(n.className||n.tagName); }
+        const list=m.querySelector('[data-page="'+m.dataset.page+'"].quicker-api__manager-panel .quicker-api__model-list');
+        // The host popup clips (overflow: hidden) rather than scrolls: nothing may overflow it either.
+        const clipped=[]; for (let n=m; n && n.tagName!=='DIALOG'; n=n.parentElement) if (n.scrollHeight>n.clientHeight+1) clipped.push(n.className||n.tagName);
+        const controls=m.closest('dialog').querySelector('.popup-controls').getBoundingClientRect();
+        return { tabs: vis(m.querySelector('.quicker-api__manager-pages')), page: m.dataset.page, remote: vis(panel('remote')), chosen: vis(panel('chosen')),
+            tabsFill: (()=>{ const bar=m.querySelector('.quicker-api__manager-pages'); const [a,b]=[...bar.children].map(x=>x.getBoundingClientRect()); const r=bar.getBoundingClientRect();
+                return Math.abs(a.left-r.left)<=1 && Math.abs(b.right-r.right)<=1 && Math.abs(a.width-b.width)<=1; })(),
+            labels: [...m.querySelectorAll('.quicker-api__manager-pages small')].map(s=>s.textContent), scrolls, clipped,
+            // The fixture popup has no buttons; reserve the real button row (about 2.5rem) within the host's 100dvh - 2em cap.
+            fits: m.closest('dialog').getBoundingClientRect().height + (controls.height ? 0 : 40) <= innerHeight - 32 + 1 && controls.bottom<=innerHeight+1, listScrolls: list.scrollHeight>list.clientHeight };
+    })()`);
+    await setViewport(360, 640);
+    await run('window.managerTask=manageCustomModels(); true');
+    let paged = await pages();
+    assert.deepEqual({ tabs: paged.tabs, page: paged.page, remote: paged.remote, chosen: paged.chosen }, { tabs: true, page: 'remote', remote: true, chosen: false });
+    assert.deepEqual(paged.scrolls, [], `nothing around the manager scrolls on phones: ${JSON.stringify(paged)}`);
+    assert.deepEqual(paged.clipped, [], `nothing in the manager is clipped by the popup: ${JSON.stringify(paged)}`);
+    assert.ok(paged.fits && paged.listScrolls, JSON.stringify(paged));
+    assert.ok(paged.tabsFill, 'the two page tabs split the full row evenly');
+    assert.equal(paged.labels[0], '80');
+    await run(`$('.quicker-api__manager-pages [data-page="chosen"]').trigger('click'); true`);
+    paged = await pages();
+    assert.deepEqual({ page: paged.page, remote: paged.remote, chosen: paged.chosen, scrolls: paged.scrolls, clipped: paged.clipped, fits: paged.fits }, { page: 'chosen', remote: false, chosen: true, scrolls: [], clipped: [], fits: true });
+    assert.match(paged.labels[1], /^\d+ · ⚠\d+$/, 'the favorites tab shows the count and stale count');
+    await setViewport(1280, 800);
+    paged = await pages();
+    assert.deepEqual({ tabs: paged.tabs, remote: paged.remote, chosen: paged.chosen }, { tabs: false, remote: true, chosen: true }, 'desktop keeps both panels side by side');
+    await run('[...ownedPopups][0].completeCancelled(); managerTask');
+    log('on phones the manager pages remote models and favorites behind tabs and never needs page scrolling; desktop shows both');
+
     // 5. Layout of the open picker: a fixed overlay (never stretches the host
     // panel), flips above when there is no room below, 2 columns on phones / 3 on desktop.
     for (const [width, columns] of [[320, '2'], [768, '3'], [1280, '3']]) {
