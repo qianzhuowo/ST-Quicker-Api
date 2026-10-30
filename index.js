@@ -97,6 +97,7 @@ const FORMATS = Object.freeze({
         endpointInput: '#openai_reverse_proxy',
     },
 });
+const MODEL_LIST_VERSION = 2;
 const DEFAULT_SETTINGS = {
     schemaVersion: SCHEMA_VERSION,
     profiles: [],
@@ -115,6 +116,11 @@ const DEFAULT_SETTINGS = {
 let operationQueue = Promise.resolve();
 let pendingOperations = 0;
 let syncingEditorModel = false;
+// Model picker view is session-only: every page load starts on favorites, and a
+// successful fetch switches to the full list until the user switches back.
+let modelPickerView = 'favorites';
+let modelPickerProfile = null;
+const modelPickerAutoFetched = new Set();
 let keyEditorDirty = false;
 let nativeCreateMonitor = null;
 let nativeIntentExpiry = null;
@@ -357,8 +363,19 @@ function normalizeQuickUrl(raw) {
 function normalizeProfile(raw) {
     const format = normalizeFormat(raw?.format);
     const model = String(raw?.model || '').slice(0, 500);
-    const availableModels = hasManagedModels(format) ? normalizeModelList(raw?.availableModels) : [];
-    if (model && !availableModels.includes(model)) availableModels.unshift(model);
+    const managed = hasManagedModels(format);
+    const fetchedModels = managed ? normalizeModelList(raw?.fetchedModels) : [];
+    let availableModels = managed ? normalizeModelList(raw?.availableModels) : [];
+    if (managed && raw?.modelListVersion !== MODEL_LIST_VERSION) {
+        // Version 1 kept the current model in the list and, for uncurated
+        // profiles, mirrored every fetched model into it. Favorites now keep only
+        // the current model; everything in the fetched snapshot is still
+        // reachable from "All". Entries absent from the snapshot (added by hand)
+        // stay, otherwise they would be lost entirely.
+        const fetched = new Set(fetchedModels);
+        if (fetched.size) availableModels = availableModels.filter(item => item === model || !fetched.has(item));
+        if (model && !availableModels.includes(model)) availableModels.unshift(model);
+    }
     return {
         id: normalizeText(raw?.id) || makeId(),
         name: sanitizeName(raw?.name) || 'API Profile',
@@ -367,10 +384,8 @@ function normalizeProfile(raw) {
         opencodeApiFormat: format === 'opencode' ? String(raw?.opencodeApiFormat || 'openai_compat') : '',
         model,
         availableModels,
-        fetchedModels: hasManagedModels(format) ? normalizeModelList(raw?.fetchedModels) : [],
-        customized: hasManagedModels(format)
-            ? (Object.hasOwn(raw || {}, 'customized') ? Boolean(raw?.customized) : Boolean(raw?.fetchedModels?.length))
-            : false,
+        fetchedModels,
+        modelListVersion: MODEL_LIST_VERSION,
         fetchedFromEndpoint: hasManagedModels(format)
             ? String(raw?.fetchedFromEndpoint || (raw?.fetchedModels?.length ? raw?.endpoint : '') || '').slice(0, 2048)
             : '',
@@ -738,24 +753,362 @@ function nativeProviderModels(format) {
         .map(option => option.value).filter(value => !platform.isModelAction(value));
 }
 
+function profileFetchedModels(profile, endpoint = profile?.endpoint) {
+    if (!profile || !hasManagedModels(profile.format)) return [];
+    return normalizeText(profile.fetchedFromEndpoint) === normalizeText(endpoint) ? normalizeModelList(profile.fetchedModels) : [];
+}
+
+// A favorite is stale only when a non-empty remote snapshot exists and lacks it.
+function staleFavoriteModels(favorites, fetched) {
+    const remote = new Set(normalizeModelList(fetched));
+    return remote.size ? normalizeModelList(favorites).filter(model => !remote.has(model)) : [];
+}
+
+function modelPickerData() {
+    const format = normalizeFormat($('#quicker_api_format').val());
+    const profile = modelPickerProfile?.format === format ? modelPickerProfile : null;
+    const current = normalizeText($('#quicker_api_custom_model').val());
+    const favorites = normalizeModelList(profile?.availableModels || []);
+    const fetched = profileFetchedModels(profile);
+    // "All" is the latest remote snapshot; the host's built-in list is only a
+    // fallback before anything has been fetched.
+    const all = fetched.length ? fetched : normalizeModelList(nativeProviderModels(format));
+    return { format, profile, current, favorites, fetched, all, stale: new Set(staleFavoriteModels(favorites, fetched)) };
+}
+
 function renderModelControl(profile = selectedProfile(), modelOverride = null) {
     const format = normalizeFormat($('#quicker_api_format').val());
-    const root = $('#quicker_api_model_control').empty();
+    const root = $('#quicker_api_model_control');
+    // While open, the dropdown lives in <body>; drop it explicitly before re-rendering.
+    const previousDropdown = $('#quicker_api_model_dropdown');
+    const previousSearch = previousDropdown.find('.quicker-api__model-search-input');
+    const reopen = root.find('.quicker-api__model-picker').hasClass('is-open');
+    const query = String(previousSearch.val() ?? '');
+    const refocus = previousSearch.is(':focus');
+    if (reopen) unbindModelPickerPosition();
+    previousDropdown.remove();
+    $('#quicker_api_model_portal').remove();
+    root.empty();
+    modelPickerProfile = profile;
     const current = normalizeText(modelOverride ?? profile?.model ?? oai_settings[FORMATS[format].modelField]);
-    const nativeModels = nativeProviderModels(format);
-    const models = normalizeModelList([...(profile?.customized ? [] : nativeModels), ...(profile?.availableModels || []), current]);
-    const select = $('<select id="quicker_api_custom_model" class="text_pole flex1" aria-label="模型">')
+    const models = normalizeModelList([current, ...(profile?.availableModels || []), ...profileFetchedModels(profile), ...nativeProviderModels(format)]);
+    // The hidden select stays the single source of the editor model value.
+    const select = $('<select id="quicker_api_custom_model" class="quicker-api__model-value" aria-hidden="true" tabindex="-1" hidden>')
         .append($('<option>').val('').text('— 选择模型 —'));
     for (const model of models) select.append($('<option>').val(model).text(model));
     select.val(current);
+    const picker = $(`<div class="quicker-api__model-picker">
+        <button id="quicker_api_model_trigger" class="text_pole quicker-api__model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="quicker_api_model_dropdown" aria-label="选择模型">
+            <i class="quicker-api__model-trigger-mark" aria-hidden="true"></i><span class="quicker-api__model-trigger-label"></span><i class="fa-solid fa-chevron-down quicker-api__model-trigger-caret" aria-hidden="true"></i>
+        </button>
+        <div id="quicker_api_model_dropdown" class="quicker-api__model-dropdown" hidden>
+            <div class="quicker-api__model-tabs" role="tablist" aria-label="模型列表">
+                <button type="button" role="tab" data-model-view="favorites" title="收藏的模型"><i class="fa-solid fa-star"></i><span>收藏</span><small></small></button>
+                <button type="button" role="tab" data-model-view="all" title="最近一次获取的全部模型"><i class="fa-solid fa-cloud"></i><span>全部</span><small></small></button>
+            </div>
+            <div class="quicker-api__model-search-row">
+                <input class="text_pole quicker-api__model-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索或输入新模型 ID" aria-label="搜索模型" aria-controls="quicker_api_model_options">
+                <button type="button" class="menu_button quicker-api__model-icon-button" data-model-picker-action="add" title="添加模型" aria-label="添加模型"><i class="fa-solid fa-plus"></i></button>
+                <button type="button" class="menu_button quicker-api__model-icon-button" data-model-picker-action="fetch" title="获取模型" aria-label="获取模型"><i class="fa-solid fa-arrows-rotate"></i></button>
+            </div>
+            <div id="quicker_api_model_options" class="quicker-api__model-options" role="listbox" aria-label="模型"></div>
+        </div>
+    </div>`);
     root.append(
+        picker,
         select,
-        $('<button id="quicker_api_add_model" class="menu_button" type="button" title="添加并使用自定义模型" aria-label="添加并使用自定义模型"><i class="fa-solid fa-plus"></i><span class="quicker-api__desktop-label">添加</span><span class="quicker-api__mobile-label">添加模型</span></button>'),
-        $('<button id="quicker_api_fetch_models" class="menu_button" type="button" title="通过 SillyTavern status 后端获取模型"><i class="fa-solid fa-arrows-rotate"></i><span class="quicker-api__desktop-label">获取模型</span><span class="quicker-api__mobile-label">获取模型</span></button>'),
-        $('<button id="quicker_api_manage_models" class="menu_button" type="button" title="管理自定义与远端模型列表"><i class="fa-solid fa-list-check"></i><span class="quicker-api__desktop-label">管理模型列表</span><span class="quicker-api__mobile-label">管理模型</span></button>'),
+        $('<button id="quicker_api_add_model" class="menu_button" type="button" title="添加模型到收藏并使用" aria-label="添加模型到收藏并使用"><i class="fa-solid fa-plus"></i><span class="quicker-api__desktop-label">添加</span><span class="quicker-api__mobile-label">添加模型</span></button>'),
+        $('<button id="quicker_api_fetch_models" class="menu_button" type="button" title="获取模型并切换到“全部”列表"><i class="fa-solid fa-arrows-rotate"></i><span class="quicker-api__desktop-label">获取模型</span><span class="quicker-api__mobile-label">获取模型</span></button>'),
+        $('<button id="quicker_api_manage_models" class="menu_button" type="button" title="批量管理收藏与远端模型列表"><i class="fa-solid fa-list-check"></i><span class="quicker-api__desktop-label">管理模型列表</span><span class="quicker-api__mobile-label">管理模型</span></button>'),
         $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
     );
+    updateModelTrigger();
+    if (reopen) openModelPicker({ query, focusSearch: refocus });
     renderPanelSummary();
+}
+
+function updateModelTrigger() {
+    const trigger = $('#quicker_api_model_trigger');
+    if (!trigger.length) return;
+    const data = modelPickerData();
+    const favorite = data.favorites.includes(data.current);
+    const stale = Boolean(data.current && data.fetched.length && !data.all.includes(data.current));
+    const mark = !data.current ? '' : stale ? 'fa-solid fa-triangle-exclamation is-stale' : favorite ? 'fa-solid fa-star is-favorite' : 'fa-solid fa-cloud';
+    trigger.toggleClass('is-empty', !data.current)
+        .attr('title', stale ? `${data.current}（云端最新列表中已不存在）` : (data.current || '选择模型'));
+    trigger.find('.quicker-api__model-trigger-mark').attr('class', `quicker-api__model-trigger-mark ${mark}`);
+    trigger.find('.quicker-api__model-trigger-label').text(data.current || '— 选择模型 —');
+}
+
+function modelPickerElement() {
+    return $('#quicker_api_model_control .quicker-api__model-picker');
+}
+
+// The dropdown is portaled to <body> while open (like the quick URL menu) so it
+// never adds to the scroll height of the host's settings panel.
+function modelPickerDropdown() {
+    return $('#quicker_api_model_dropdown');
+}
+
+let modelPickerColumns = 1;
+let modelPickerPositionFrame = 0;
+
+function positionModelPicker() {
+    modelPickerPositionFrame = 0;
+    const dropdown = document.getElementById('quicker_api_model_dropdown');
+    const trigger = document.getElementById('quicker_api_model_trigger');
+    if (!dropdown || dropdown.hidden || !trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const viewportWidth = globalThis.visualViewport?.width || window.innerWidth;
+    const viewportHeight = globalThis.visualViewport?.height || window.innerHeight;
+    // The trigger was hidden (drawer closed) or scrolled fully out of view.
+    if ((!rect.width && !rect.height) || rect.bottom < 0 || rect.top > viewportHeight) return closeModelPicker();
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const margin = 8;
+    const gap = 4;
+    const width = Math.min(viewportWidth - margin * 2, Math.max(rect.width, 40 * rem));
+    const left = Math.max(margin, Math.min(rect.left, viewportWidth - margin - width));
+    const below = viewportHeight - rect.bottom - gap - margin;
+    const above = rect.top - gap - margin;
+    const placeAbove = below < 15 * rem && above > below;
+    const maxHeight = Math.max(10 * rem, Math.min(30 * rem, placeAbove ? above : below));
+    Object.assign(dropdown.style, {
+        left: `${left}px`,
+        width: `${width}px`,
+        maxHeight: `${maxHeight}px`,
+        top: placeAbove ? '' : `${rect.bottom + gap}px`,
+        bottom: placeAbove ? `${viewportHeight - rect.top + gap}px` : '',
+    });
+    dropdown.classList.toggle('is-above', placeAbove);
+    // 2 columns on phones, 3 on wide phones/tablets, 4 on desktop. Always
+    // written: the dropdown element is recreated whenever the panel re-renders.
+    modelPickerColumns = Math.max(1, Math.min(4, Math.floor((width - 0.9 * rem) / (8 * rem))));
+    dropdown.style.setProperty('--quicker-api-model-columns', String(modelPickerColumns));
+}
+
+function scheduleModelPickerPosition(event) {
+    // Scrolling the option list itself never moves the anchor.
+    if (event?.type === 'scroll' && event.target instanceof Node && document.getElementById('quicker_api_model_dropdown')?.contains(event.target)) return;
+    if (!modelPickerPositionFrame) modelPickerPositionFrame = requestAnimationFrame(positionModelPicker);
+}
+
+function bindModelPickerPosition() {
+    window.addEventListener('resize', scheduleModelPickerPosition);
+    globalThis.visualViewport?.addEventListener('resize', scheduleModelPickerPosition);
+    document.addEventListener('scroll', scheduleModelPickerPosition, true);
+}
+
+function unbindModelPickerPosition() {
+    window.removeEventListener('resize', scheduleModelPickerPosition);
+    globalThis.visualViewport?.removeEventListener('resize', scheduleModelPickerPosition);
+    document.removeEventListener('scroll', scheduleModelPickerPosition, true);
+    if (modelPickerPositionFrame) cancelAnimationFrame(modelPickerPositionFrame);
+    modelPickerPositionFrame = 0;
+}
+
+function openModelPicker({ query = '', focusSearch = true } = {}) {
+    const picker = modelPickerElement();
+    const dropdown = modelPickerDropdown();
+    if (!picker.length || !dropdown.length) return;
+    const wasOpen = picker.hasClass('is-open');
+    picker.addClass('is-open');
+    // .openDrawer.pinnedOpen keeps the host from treating clicks here as
+    // "outside the drawer"; it only exists while the dropdown is open.
+    let portal = $('#quicker_api_model_portal');
+    if (!portal.length) portal = $('<div id="quicker_api_model_portal" class="quicker-api__model-portal openDrawer pinnedOpen">').appendTo(document.body);
+    dropdown.appendTo(portal).prop('hidden', false);
+    $('#quicker_api_model_trigger').attr('aria-expanded', 'true');
+    positionModelPicker();
+    if (!wasOpen) bindModelPickerPosition();
+    const search = dropdown.find('.quicker-api__model-search-input').val(query);
+    renderModelPickerOptions();
+    // Avoid summoning the on-screen keyboard on touch devices.
+    if (focusSearch && !globalThis.matchMedia?.('(pointer: coarse)').matches) search[0]?.focus({ preventScroll: true });
+}
+
+function closeModelPicker({ focusTrigger = false } = {}) {
+    const picker = modelPickerElement();
+    const dropdown = modelPickerDropdown();
+    if (!picker.hasClass('is-open')) {
+        // A stale portaled dropdown must never outlive its picker.
+        if (!picker.length) $('#quicker_api_model_portal').remove();
+        return;
+    }
+    unbindModelPickerPosition();
+    picker.removeClass('is-open');
+    dropdown.prop('hidden', true).appendTo(picker);
+    $('#quicker_api_model_portal').remove();
+    $('#quicker_api_model_trigger').attr('aria-expanded', 'false');
+    if (focusTrigger) $('#quicker_api_model_trigger').trigger('focus');
+}
+
+function renderModelPickerOptions() {
+    const picker = modelPickerDropdown();
+    if (!picker.length) return;
+    const data = modelPickerData();
+    const view = modelPickerView;
+    const query = normalizeText(picker.find('.quicker-api__model-search-input').val());
+    picker.find('[data-model-view]').each((_, tab) => {
+        const active = tab.dataset.modelView === view;
+        $(tab).toggleClass('is-active', active).attr('aria-selected', String(active))
+            .find('small').text(tab.dataset.modelView === 'favorites' ? data.favorites.length : data.all.length);
+    });
+    const favorites = new Set(data.favorites);
+    const base = view === 'favorites' ? data.favorites : data.all;
+    const entries = (data.current && !base.includes(data.current) ? [data.current, ...base] : base)
+        .filter(model => matchesModelSearch(model, query));
+    const list = picker.find('.quicker-api__model-options').empty();
+    for (const model of entries) {
+        const isFavorite = favorites.has(model);
+        const selected = model === data.current;
+        const stale = data.stale.has(model);
+        const star = $('<button type="button" class="quicker-api__model-star" tabindex="-1">')
+            .attr({ 'aria-pressed': String(isFavorite), 'aria-label': `${isFavorite ? '取消收藏' : '收藏'} ${model}`, title: isFavorite ? '取消收藏' : '收藏' })
+            .prop('disabled', !data.profile)
+            .append($('<i>').addClass(isFavorite ? 'fa-solid fa-star' : 'fa-regular fa-star'));
+        const badges = $('<span class="quicker-api__model-option-badges">');
+        if (stale) badges.append($('<i class="fa-solid fa-triangle-exclamation" title="云端最新列表中已不存在">'));
+        if (selected && !base.includes(model)) badges.append($('<small>').text(view === 'favorites' && !isFavorite ? '当前·未收藏' : '当前'));
+        if (selected) badges.append($('<i class="fa-solid fa-check" aria-hidden="true">'));
+        list.append($('<div class="quicker-api__model-option" role="option">')
+            .attr({ 'data-model': model, 'aria-selected': String(selected), title: stale ? `${model}（云端最新列表中已不存在）` : model })
+            .toggleClass('is-favorite', isFavorite).toggleClass('is-selected', selected).toggleClass('is-stale', stale)
+            .append(star, $('<span class="quicker-api__model-option-name">').text(model), badges));
+    }
+    if (query && data.profile && !favorites.has(query) && !data.all.includes(query) && query !== data.current) {
+        list.append($('<div class="quicker-api__model-option quicker-api__model-add" role="option" aria-selected="false">')
+            .attr('data-add-model', query)
+            .append($('<i class="fa-solid fa-plus" aria-hidden="true">'), $('<span class="quicker-api__model-option-name">').text(`收藏并使用“${query}”`)));
+    }
+    if (!list.children().length) {
+        const message = !data.profile ? '请先选择并保存 API 配置'
+            : query ? '没有匹配的模型'
+                : view === 'favorites' ? '收藏为空：在“全部”中点 ☆ 收藏，或输入模型 ID 添加'
+                    : '尚未获取模型列表，点击下方“获取模型”';
+        list.append($('<div class="quicker-api__empty-state">').text(message));
+    }
+    const fetchLabel = data.fetched.length ? '刷新列表' : '获取模型';
+    picker.find('[data-model-picker-action="fetch"]').attr({ title: fetchLabel, 'aria-label': fetchLabel });
+    const options = list.children('.quicker-api__model-option');
+    const selectedIndex = options.toArray().findIndex(option => option.classList.contains('is-selected'));
+    setModelPickerActive(selectedIndex >= 0 && !query ? selectedIndex : 0, { scroll: true });
+}
+
+function setModelPickerActive(index, { scroll = true } = {}) {
+    const options = modelPickerDropdown().find('.quicker-api__model-option');
+    options.removeClass('is-active');
+    if (!options.length) return;
+    const active = options.eq(Math.max(0, Math.min(index, options.length - 1))).addClass('is-active');
+    if (scroll) active[0]?.scrollIntoView?.({ block: 'nearest' });
+}
+
+function moveModelPickerActive(step) {
+    const options = modelPickerDropdown().find('.quicker-api__model-option');
+    if (!options.length) return;
+    const last = options.length - 1;
+    const index = Math.max(0, options.toArray().findIndex(option => option.classList.contains('is-active')));
+    const next = index + step;
+    // Moving past an edge clamps to the edge first, then wraps around.
+    setModelPickerActive(next > last ? (index === last ? 0 : last) : next < 0 ? (index === 0 ? last : 0) : next);
+}
+
+function activateModelPickerOption(option) {
+    const row = $(option);
+    const added = row.attr('data-add-model');
+    if (added !== undefined) {
+        if (!modelPickerProfile) return;
+        closeModelPicker({ focusTrigger: true });
+        return favoriteAndUseModel(modelPickerProfile, added);
+    }
+    const model = row.attr('data-model');
+    if (model === undefined) return;
+    $('#quicker_api_custom_model').val(model).trigger('change');
+    closeModelPicker({ focusTrigger: true });
+}
+
+function toggleFavoriteModel(model) {
+    const profile = modelPickerProfile;
+    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
+    const favorites = normalizeModelList(profile.availableModels);
+    profile.availableModels = favorites.includes(model) ? favorites.filter(item => item !== model) : [...favorites, model];
+    profile.updatedAt = new Date().toISOString();
+    scheduleSettingsSave();
+    const index = modelPickerDropdown().find('.quicker-api__model-option').toArray().findIndex(option => option.getAttribute('data-model') === model);
+    renderModelPickerOptions();
+    if (index >= 0) setModelPickerActive(index, { scroll: false });
+    updateModelTrigger();
+}
+
+function switchModelPickerView(view) {
+    modelPickerView = view === 'all' ? 'all' : 'favorites';
+    renderModelPickerOptions();
+    const data = modelPickerData();
+    const profile = data.profile;
+    if (modelPickerView !== 'all' || data.fetched.length || !profile || profile !== selectedProfile()) return;
+    // First visit to an empty full list: fetch once per profile/endpoint per session.
+    const key = `${profile.id}\n${profile.endpoint}`;
+    if (modelPickerAutoFetched.has(key)) return;
+    modelPickerAutoFetched.add(key);
+    void enqueueOperation(fetchCustomModels);
+}
+
+function bindModelPickerEvents() {
+    $(document).on('click.quickerApi', '#quicker_api_model_trigger', () => {
+        if (modelPickerElement().hasClass('is-open')) closeModelPicker();
+        else openModelPicker();
+    });
+    $(document).on('keydown.quickerApi', '#quicker_api_model_trigger', event => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            openModelPicker();
+        }
+    });
+    $(document).on('click.quickerApi', '#quicker_api_model_dropdown [data-model-view]', function () {
+        switchModelPickerView(this.dataset.modelView);
+    });
+    $(document).on('input.quickerApi', '.quicker-api__model-search-input', renderModelPickerOptions);
+    $(document).on('keydown.quickerApi', '.quicker-api__model-picker, #quicker_api_model_dropdown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            closeModelPicker({ focusTrigger: true });
+            return;
+        }
+        if (!$(event.target).is('.quicker-api__model-search-input')) return;
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            moveModelPickerActive((event.key === 'ArrowDown' ? 1 : -1) * modelPickerColumns);
+        } else if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.target.value) {
+            // With an empty search box there is no caret to move: walk the grid.
+            event.preventDefault();
+            moveModelPickerActive(event.key === 'ArrowRight' ? 1 : -1);
+        } else if (event.key === 'Enter') {
+            event.preventDefault();
+            event.stopPropagation();
+            const active = modelPickerDropdown().find('.quicker-api__model-option.is-active');
+            if (active.length) activateModelPickerOption(active[0]);
+        }
+    });
+    $(document).on('click.quickerApi', '.quicker-api__model-star', function (event) {
+        event.stopPropagation();
+        toggleFavoriteModel($(this).closest('.quicker-api__model-option').attr('data-model'));
+    });
+    $(document).on('click.quickerApi', '.quicker-api__model-option', function () {
+        activateModelPickerOption(this);
+    });
+    $(document).on('click.quickerApi', '[data-model-picker-action]', function () {
+        const query = normalizeText(modelPickerDropdown().find('.quicker-api__model-search-input').val());
+        if (this.dataset.modelPickerAction === 'add') {
+            closeModelPicker();
+            void addCustomModel(query || '');
+        } else {
+            void enqueueOperation(fetchCustomModels);
+        }
+    });
+    $(document).on('pointerdown.quickerApi', event => {
+        const picker = modelPickerElement();
+        if (picker.hasClass('is-open') && !picker[0].contains(event.target) && !modelPickerDropdown()[0]?.contains(event.target)) closeModelPicker();
+    });
 }
 
 function renderProfileEditor(profile = selectedProfile(), modelOverride = null) {
@@ -1715,7 +2068,8 @@ async function saveSelectedProfile() {
         proxyPassword: keyValue || retainedProxy?.password,
     }));
     if (hasManagedModels(format)) {
-        current.availableModels = normalizeModelList([...(current.availableModels || []), current.model]);
+        // Favorites are explicit; only a brand-new profile starts with its model favorited.
+        if (isNew) current.availableModels = normalizeModelList([...(current.availableModels || []), current.model]);
         if (!isNew && previousEndpoint !== normalizeText(current.endpoint)) {
             current.fetchedModels = [];
             current.fetchedFromEndpoint = '';
@@ -1910,17 +2264,19 @@ async function copyBoundSecret() {
     }
 }
 
-async function addCustomModel() {
+async function addCustomModel(initial = null) {
     const profile = selectedProfile();
     if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
-    const model = await promptName('输入模型 ID：', getEditorModel(profile.format));
+    const model = await promptName('输入模型 ID（将加入收藏并使用）：', typeof initial === 'string' ? initial : getEditorModel(profile.format));
     if (!model) return;
+    favoriteAndUseModel(profile, model);
+}
+
+function favoriteAndUseModel(profile, model) {
     profile.availableModels = normalizeModelList([...(profile.availableModels || []), model]);
-    profile.customized = true;
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
-    renderModelControl(profile);
-    $('#quicker_api_custom_model').val(model);
+    renderModelControl(profile, model);
     syncEditorModelToNative();
     renderStatus();
 }
@@ -2092,12 +2448,13 @@ async function fetchCustomModels() {
         const result = await fetchModelsForProfile(profile, editorUrl);
         profile.fetchedModels = result.models;
         profile.fetchedFromEndpoint = editorUrl;
-        if (!profile.customized) profile.availableModels = normalizeModelList([profile.model, ...result.models]);
         profile.updatedAt = new Date().toISOString();
         scheduleSettingsSave();
-        renderModelControl(profile);
-        $('#quicker_api_custom_model').val(profile.model);
-        toastr.success(`通过${result.route}获取 ${result.models.length} 个模型。`);
+        modelPickerView = 'all';
+        renderModelControl(profile, getEditorModel(profile.format) || profile.model);
+        const stale = staleFavoriteModels(profile.availableModels, result.models);
+        toastr.success(`通过${result.route}获取 ${result.models.length} 个模型，已切换到“全部”列表。`);
+        if (stale.length) toastr.warning(`${stale.length} 个收藏模型不在云端最新列表中，可在“管理模型列表”中一键清理。`);
         renderStatus();
     } catch (error) {
         console.error('[QuickerApi] Model fetch failed:', error);
@@ -2128,12 +2485,10 @@ async function manageCustomModels() {
 
     const draft = {
         current: normalizeText(getEditorModel(profile.format) || profile.model),
-        available: normalizeModelList([...(profile.customized ? [] : nativeProviderModels(profile.format)), ...profile.availableModels]),
+        available: normalizeModelList(profile.availableModels),
         fetched: profile.fetchedFromEndpoint === endpoint ? normalizeModelList(profile.fetchedModels) : [],
         fetchedFromEndpoint: profile.fetchedFromEndpoint === endpoint ? endpoint : '',
-        customized: Boolean(profile.customized),
     };
-    if (draft.current && !draft.available.includes(draft.current)) draft.available.unshift(draft.current);
     const initialDraft = structuredClone(draft);
 
     const content = $('<div class="quicker-api__model-manager">');
@@ -2151,6 +2506,7 @@ async function manageCustomModels() {
     const chosenActions = $('<div class="quicker-api__manager-actions">').append(
         customInput,
         $('<button type="button" class="menu_button" data-action="add"><i class="fa-solid fa-plus"></i><span>新增</span></button>'),
+        $('<button type="button" class="menu_button quicker-api__prune-stale" data-action="prune" title="移除云端最新列表中已不存在的收藏"><i class="fa-solid fa-broom"></i><span>清理失效</span></button>'),
         $('<button type="button" class="menu_button" data-action="clear">清空</button>'),
         $('<button type="button" class="menu_button" data-action="reset">重置</button>'),
     );
@@ -2162,95 +2518,229 @@ async function manageCustomModels() {
     const searchHelp = $('<small class="quicker-api__model-search-help">').text('忽略大小写，支持部分名称或按顺序输入不连续字符；筛选时批量操作仅影响匹配项。');
     const remoteList = $('<div class="quicker-api__model-list">');
     const chosenList = $('<div class="quicker-api__model-list">');
-    remotePanel.append($('<h4><i class="fa-solid fa-cloud-arrow-down"></i> 远端模型</h4>'), remoteActions, remoteSearch, searchHelp, searchCount, remoteList);
-    chosenPanel.append($('<h4><i class="fa-solid fa-list-check"></i> 下拉留存 / 自定义</h4>'), chosenActions, chosenList);
+    const chosenTitle = $('<h4><i class="fa-solid fa-star"></i> 收藏（下拉“收藏”列表）</h4>');
+    const staleBadge = $('<span class="quicker-api__stale-badge" role="status" aria-live="polite">');
+    chosenTitle.append(staleBadge);
+    remotePanel.append($('<h4><i class="fa-solid fa-cloud-arrow-down"></i> 远端模型（勾选 = 收藏）</h4>'), remoteActions, remoteSearch, searchHelp, searchCount, remoteList);
+    chosenPanel.append(chosenTitle, chosenActions, chosenList);
     columns.append(remotePanel, chosenPanel);
     content.append(columns);
 
-    const ensureCurrent = () => {
+    const normalizeDraft = () => {
         draft.available = normalizeModelList(draft.available);
-        if (draft.current && !draft.available.includes(draft.current)) draft.available.unshift(draft.current);
     };
-    const markCustomized = () => {
-        draft.customized = true;
-        ensureCurrent();
-    };
+    const draftStaleModels = () => staleFavoriteModels(draft.available, draft.fetched);
     const filteredRemoteModels = () => draft.fetched.filter(model => matchesModelSearch(model, searchInput.val()));
-    const renderManager = ({ remoteOnly = false } = {}) => {
-        ensureCurrent();
-        const selected = new Set(draft.available);
-        const remote = new Set(draft.fetched);
-        const matching = filteredRemoteModels();
-        searchCount.text(`显示 ${matching.length} / ${draft.fetched.length} 个模型`);
-        remoteList.empty();
-        if (!draft.fetched.length) remoteList.append($('<div class="quicker-api__empty-state">').text('尚无当前 URL 的远端快照'));
-        else if (!matching.length) remoteList.append($('<div class="quicker-api__empty-state">').text('没有匹配的远端模型，请尝试其他关键词或清空搜索'));
-        for (const model of matching) {
-            const checkbox = $('<input type="checkbox">').prop('checked', selected.has(model)).attr('aria-label', `选择 ${model}`);
-            const row = $('<div class="quicker-api__model-item quicker-api__remote-model" role="checkbox" tabindex="0">')
-                .attr('aria-checked', selected.has(model)).append(checkbox, $('<span>').text(model), $('<small>').text('远端'));
-            const toggle = checked => {
-                if (checked) draft.available = normalizeModelList([...draft.available, model]);
-                else if (model !== draft.current) draft.available = draft.available.filter(item => item !== model);
-                markCustomized();
-                renderManager();
-            };
-            checkbox.on('click', event => event.stopPropagation()).on('change', () => toggle(checkbox.prop('checked')));
-            row.on('click', () => toggle(!selected.has(model))).on('keydown', event => {
-                if (event.key === ' ' || event.key === 'Enter') {
-                    event.preventDefault();
-                    toggle(!selected.has(model));
-                }
-            });
-            remoteList.append(row);
-        }
 
-        if (remoteOnly) return; // Searching must not reset an in-progress chosen-list edit.
-        chosenList.empty();
-        if (!draft.available.length) chosenList.append($('<div class="quicker-api__empty-state">').text('留存列表为空'));
+    // Remote rows are built once per snapshot (lists can hold hundreds of
+    // models); selecting and searching only update attributes on those rows.
+    let remoteRows = new Map();
+    let renderedFetched = null;
+    const remoteEmpty = document.createElement('div');
+    remoteEmpty.className = 'quicker-api__empty-state';
+    const buildRemoteRows = () => {
+        renderedFetched = draft.fetched;
+        remoteRows = new Map();
+        const fragment = document.createDocumentFragment();
+        for (const model of draft.fetched) {
+            const row = document.createElement('div');
+            row.className = 'quicker-api__model-item quicker-api__remote-model';
+            row.setAttribute('role', 'checkbox');
+            row.tabIndex = 0;
+            row.dataset.model = model;
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.tabIndex = -1;
+            checkbox.setAttribute('aria-label', `选择 ${model}`);
+            const name = document.createElement('span');
+            name.textContent = model;
+            const source = document.createElement('small');
+            source.textContent = '远端';
+            row.append(checkbox, name, source);
+            remoteRows.set(model, { row, checkbox });
+            fragment.append(row);
+        }
+        remoteList[0].replaceChildren(remoteEmpty, fragment);
+    };
+    const syncRemoteChecks = () => {
+        const selected = new Set(draft.available);
+        for (const [model, { row, checkbox }] of remoteRows) {
+            const checked = selected.has(model);
+            if (checkbox.checked !== checked) checkbox.checked = checked;
+            if (row.getAttribute('aria-checked') !== String(checked)) row.setAttribute('aria-checked', String(checked));
+        }
+    };
+    const syncRemoteFilter = () => {
+        const query = searchInput.val();
+        let shown = 0;
+        for (const [model, { row }] of remoteRows) {
+            const visible = matchesModelSearch(model, query);
+            if (row.hidden === visible) row.hidden = !visible;
+            if (visible) shown += 1;
+        }
+        searchCount.text(`显示 ${shown} / ${draft.fetched.length} 个模型`);
+        remoteEmpty.hidden = shown > 0;
+        remoteEmpty.textContent = shown ? ''
+            : !draft.fetched.length ? '尚无当前 URL 的远端快照'
+                : '没有匹配的远端模型，请尝试其他关键词或清空搜索';
+    };
+
+    const chosenButton = (op, icon, label) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'menu_button';
+        button.dataset.op = op;
+        button.title = label;
+        button.setAttribute('aria-label', label);
+        const glyph = document.createElement('i');
+        glyph.className = `fa-solid ${icon}`;
+        button.append(glyph);
+        return button;
+    };
+    const chosenRows = new Map();
+    const chosenEmpty = document.createElement('div');
+    chosenEmpty.className = 'quicker-api__empty-state';
+    chosenEmpty.textContent = '收藏列表为空';
+    chosenList[0].append(chosenEmpty);
+    const createChosenRow = model => {
+        const row = document.createElement('div');
+        row.className = 'quicker-api__model-item quicker-api__chosen-model';
+        const position = document.createElement('span');
+        position.className = 'quicker-api__drag-index';
+        const input = document.createElement('input');
+        input.className = 'text_pole';
+        input.type = 'text';
+        input.readOnly = true;
+        input.value = model;
+        input.setAttribute('aria-label', `模型 ${model}`);
+        const label = document.createElement('small');
+        const up = chosenButton('up', 'fa-arrow-up', '上移');
+        const down = chosenButton('down', 'fa-arrow-down', '下移');
+        const actions = document.createElement('div');
+        actions.className = 'quicker-api__item-actions';
+        actions.append(chosenButton('edit', 'fa-pen', '编辑'), chosenButton('remove', 'fa-trash', '删除'), up, down);
+        row.append(position, input, label, actions);
+        const entry = { row, position, input, label, up, down, index: -1, source: '' };
+        chosenRows.set(model, entry);
+        return entry;
+    };
+    const renderChosen = () => {
+        const remote = new Set(draft.fetched);
+        const stale = new Set(draftStaleModels());
+        staleBadge.text(stale.size ? `⚠ ${stale.size} 个失效` : '').attr('title', stale.size ? '这些收藏不在当前 URL 的云端最新列表中' : '').prop('hidden', !stale.size);
+        chosenActions.find('[data-action="prune"]').prop('disabled', !stale.size)
+            .find('span').text(stale.size ? `清理失效 (${stale.size})` : '清理失效');
+        const wanted = new Set(draft.available);
+        for (const [model, entry] of chosenRows) {
+            if (wanted.has(model)) continue;
+            entry.row.remove();
+            chosenRows.delete(model);
+        }
+        chosenEmpty.hidden = draft.available.length > 0;
+        // Keyed update: rows for unchanged models are reused and only touched
+        // where their position, flags or source actually changed.
+        const last = draft.available.length - 1;
+        let cursor = chosenEmpty.nextSibling;
         draft.available.forEach((model, index) => {
-            const input = $('<input class="text_pole" type="text" readonly>').val(model).attr('aria-label', `模型 ${model}`);
-            const edit = $('<button type="button" class="menu_button" title="编辑" aria-label="编辑"><i class="fa-solid fa-pen"></i></button>');
-            const remove = $('<button type="button" class="menu_button" title="删除" aria-label="删除"><i class="fa-solid fa-trash"></i></button>');
-            const up = $('<button type="button" class="menu_button" title="上移" aria-label="上移"><i class="fa-solid fa-arrow-up"></i></button>').prop('disabled', index === 0);
-            const down = $('<button type="button" class="menu_button" title="下移" aria-label="下移"><i class="fa-solid fa-arrow-down"></i></button>').prop('disabled', index === draft.available.length - 1);
-            const commitEdit = () => {
-                const next = normalizeText(input.val());
-                if (!next || (next !== model && draft.available.includes(next))) return renderManager();
-                draft.available[index] = next;
-                if (draft.current === model) draft.current = next;
-                markCustomized();
-                renderManager();
-            };
-            edit.on('click', () => input.prop('readonly', false).trigger('focus').trigger('select'));
-            input.on('keydown', event => {
-                if (event.key === 'Enter') commitEdit();
-                if (event.key === 'Escape') renderManager();
-            }).on('change', commitEdit);
-            remove.on('click', () => {
-                const deletingCurrent = draft.current === model;
-                draft.available.splice(index, 1);
-                if (deletingCurrent) draft.current = draft.available[0] || '';
-                markCustomized();
-                renderManager();
-            });
-            up.on('click', () => {
-                [draft.available[index - 1], draft.available[index]] = [draft.available[index], draft.available[index - 1]];
-                markCustomized();
-                renderManager();
-            });
-            down.on('click', () => {
-                [draft.available[index + 1], draft.available[index]] = [draft.available[index], draft.available[index + 1]];
-                markCustomized();
-                renderManager();
-            });
-            const source = remote.has(model) ? '远端' : '自定义';
-            chosenList.append($('<div class="quicker-api__model-item quicker-api__chosen-model">').append(
-                $('<span class="quicker-api__drag-index">').text(index + 1), input, $('<small>').text(source),
-                $('<div class="quicker-api__item-actions">').append(edit, remove, up, down),
-            ));
+            const entry = chosenRows.get(model) ?? createChosenRow(model);
+            const isStale = stale.has(model);
+            const source = isStale ? 'stale' : remote.has(model) ? 'remote' : 'custom';
+            if (entry.index !== index) {
+                entry.index = index;
+                entry.row.dataset.index = String(index);
+                entry.position.textContent = String(index + 1);
+            }
+            entry.up.disabled = index === 0;
+            entry.down.disabled = index === last;
+            if (!entry.input.readOnly || entry.input.value !== model) {
+                entry.input.readOnly = true;
+                entry.input.value = model;
+            }
+            if (entry.source !== source) {
+                entry.source = source;
+                entry.row.classList.toggle('is-stale', isStale);
+                if (isStale) entry.row.title = '云端最新列表中已不存在该模型';
+                else entry.row.removeAttribute('title');
+                entry.label.replaceChildren();
+                if (isStale) {
+                    const warning = document.createElement('i');
+                    warning.className = 'fa-solid fa-triangle-exclamation';
+                    warning.setAttribute('aria-hidden', 'true');
+                    entry.label.append(warning, ' ');
+                }
+                entry.label.append(isStale ? '云端已无' : source === 'remote' ? '远端' : '自定义');
+            }
+            if (entry.row === cursor) cursor = cursor.nextSibling;
+            else chosenList[0].insertBefore(entry.row, cursor);
         });
     };
+    // A draft edit: only the checkboxes and the (short) favorites list change.
+    const updateDraft = () => {
+        normalizeDraft();
+        syncRemoteChecks();
+        renderChosen();
+    };
+    const renderManager = () => {
+        normalizeDraft();
+        if (renderedFetched !== draft.fetched) buildRemoteRows();
+        syncRemoteChecks();
+        syncRemoteFilter();
+        renderChosen();
+    };
+
+    const toggleRemoteModel = (model, checked) => {
+        draft.available = checked ? [...draft.available, model] : draft.available.filter(item => item !== model);
+        updateDraft();
+    };
+    remoteList.on('click', '.quicker-api__remote-model', function (event) {
+        const model = this.dataset.model;
+        const checkbox = remoteRows.get(model)?.checkbox;
+        toggleRemoteModel(model, event.target === checkbox ? checkbox.checked : !draft.available.includes(model));
+    }).on('keydown', '.quicker-api__remote-model', function (event) {
+        if (event.target !== this || (event.key !== ' ' && event.key !== 'Enter')) return;
+        event.preventDefault();
+        event.stopPropagation(); // Host Popup treats Enter as confirmation.
+        toggleRemoteModel(this.dataset.model, !draft.available.includes(this.dataset.model));
+    });
+
+    const commitChosenEdit = input => {
+        if (input.readOnly) return;
+        const index = Number(input.closest('.quicker-api__chosen-model')?.dataset.index);
+        const model = draft.available[index];
+        const next = normalizeText(input.value);
+        if (model === undefined || !next || (next !== model && draft.available.includes(next))) return renderChosen();
+        draft.available[index] = next;
+        if (draft.current === model) draft.current = next;
+        updateDraft();
+    };
+    chosenList.on('click', '[data-op]', function () {
+        const row = this.closest('.quicker-api__chosen-model');
+        const index = Number(row?.dataset.index);
+        if (!Number.isInteger(index)) return;
+        const op = this.dataset.op;
+        if (op === 'edit') {
+            const input = row.querySelector('input');
+            input.readOnly = false;
+            input.focus();
+            input.select();
+            return;
+        }
+        if (op === 'remove') draft.available.splice(index, 1);
+        const swap = op === 'up' ? index - 1 : op === 'down' ? index + 1 : -1;
+        if (swap >= 0 && swap < draft.available.length) {
+            [draft.available[swap], draft.available[index]] = [draft.available[index], draft.available[swap]];
+        }
+        updateDraft();
+    }).on('keydown', '.quicker-api__chosen-model > input', function (event) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            event.stopPropagation(); // Host Popup treats Enter as confirmation.
+            commitChosenEdit(this);
+        }
+        if (event.key === 'Escape') renderChosen();
+    }).on('change', '.quicker-api__chosen-model > input', function () {
+        commitChosenEdit(this);
+    });
 
     remoteActions.on('click', 'button', async function () {
         const action = String($(this).data('action'));
@@ -2260,7 +2750,6 @@ async function manageCustomModels() {
                 const result = await fetchModelsForProfile(profile, endpoint);
                 draft.fetched = result.models;
                 draft.fetchedFromEndpoint = endpoint;
-                if (!draft.customized) draft.available = normalizeModelList([draft.current, ...result.models]);
                 toastr.success(`通过${result.route}获取 ${result.models.length} 个模型；确认后保存快照。`);
             } catch (error) {
                 console.error('[QuickerApi] Model manager fetch failed:', error);
@@ -2273,33 +2762,37 @@ async function manageCustomModels() {
         }
         const matching = filteredRemoteModels();
         const remote = new Set(matching);
-        if (action === 'all') draft.available = normalizeModelList([...draft.available, ...matching]);
+        if (action === 'all') draft.available = [...draft.available, ...matching];
         if (action === 'invert') {
-            draft.available = normalizeModelList([
+            const chosen = new Set(draft.available);
+            draft.available = [
                 ...draft.available.filter(model => !remote.has(model)),
-                ...matching.filter(model => !draft.available.includes(model)),
-            ]);
+                ...matching.filter(model => !chosen.has(model)),
+            ];
         }
-        if (action === 'none') draft.available = draft.available.filter(model => !remote.has(model) || model === draft.current);
-        markCustomized();
-        renderManager();
+        if (action === 'none') draft.available = draft.available.filter(model => !remote.has(model));
+        updateDraft();
     });
     const addDraftModel = () => {
         const model = normalizeText(customInput.val());
         if (!model) return;
-        draft.available = normalizeModelList([...draft.available, model]);
+        draft.available = [...draft.available, model];
         customInput.val('');
-        markCustomized();
-        renderManager();
+        updateDraft();
     };
     chosenActions.on('click', 'button', function () {
         const action = String($(this).data('action'));
         if (action === 'add') addDraftModel();
+        if (action === 'prune') {
+            const stale = new Set(draftStaleModels());
+            if (!stale.size) return;
+            draft.available = draft.available.filter(model => !stale.has(model));
+            updateDraft();
+            toastr.info(`已移除 ${stale.size} 个失效收藏；点击保存后生效。${stale.has(draft.current) ? '当前选中的模型不受影响，但它已不在云端列表中。' : ''}`);
+        }
         if (action === 'clear') {
             draft.available = [];
-            draft.current = '';
-            markCustomized();
-            renderManager();
+            updateDraft();
         }
         if (action === 'reset') {
             Object.assign(draft, structuredClone(initialDraft));
@@ -2312,7 +2805,7 @@ async function manageCustomModels() {
             addDraftModel();
         }
     });
-    searchInput.on('input', () => renderManager({ remoteOnly: true })).on('keydown', event => {
+    searchInput.on('input', syncRemoteFilter).on('keydown', event => {
         if (event.key === 'Enter') {
             event.preventDefault();
             event.stopPropagation(); // Host Popup treats Enter as confirmation.
@@ -2320,7 +2813,7 @@ async function manageCustomModels() {
     });
     clearSearch.on('click', () => {
         searchInput.val('');
-        renderManager({ remoteOnly: true });
+        syncRemoteFilter();
         searchInput.trigger('focus');
     });
     renderManager();
@@ -2332,15 +2825,13 @@ async function manageCustomModels() {
         cancelButton: '取消',
         animation: 'none',
     })) return;
-    ensureCurrent();
+    normalizeDraft();
     profile.availableModels = draft.available;
     profile.fetchedModels = draft.fetched;
-    profile.customized = draft.customized;
     profile.fetchedFromEndpoint = draft.fetchedFromEndpoint;
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
-    renderModelControl(profile);
-    $('#quicker_api_custom_model').val(draft.current);
+    renderModelControl(profile, draft.current);
     syncEditorModelToNative();
     renderStatus();
 }
@@ -2379,7 +2870,7 @@ function modelSuggestionsForProfile(profileId = '') {
     const profile = profiles().find(item => item.id === profileId) || null;
     if (!profile) return [];
     return normalizeModelList([profile.model, ...(profile.availableModels || []),
-        ...(profile.customized ? [] : nativeProviderModels(profile.format))]);
+        ...profileFetchedModels(profile, profile.endpoint), ...nativeProviderModels(profile.format)]);
 }
 
 function normalizeQuickActionPlacement(value, fallback = 'rightSendForm') {
@@ -3280,8 +3771,10 @@ function bindEvents() {
     $(document).on('input.quickerApi', '#custom_include_body, #custom_exclude_body, #custom_include_headers', renderStatus);
     $(document).on('change.quickerApi', '#quicker_api_custom_model, #quicker_api_provider_model', () => {
         syncEditorModelToNative();
+        updateModelTrigger();
         renderStatus();
     });
+    bindModelPickerEvents();
     $(document).on('click.quickerApi', '#quicker_api_add_model', addCustomModel);
     $(document).on('click.quickerApi', '#quicker_api_fetch_models', () => void enqueueOperation(fetchCustomModels));
     $(document).on('click.quickerApi', '#quicker_api_manage_models', manageCustomModels);
@@ -3404,6 +3897,8 @@ async function teardownQuickerApi() {
     quickActionRenderPending = false;
     clearKeyEditor();
     $('#quicker_api').remove();
+    unbindModelPickerPosition();
+    $('#quicker_api_model_portal').remove();
     $('#custom_form, #claude_form, #makersuite_form').removeClass('quicker-api__native-provider');
     $(document).off('.quickerApi').off('.quickerApiMenu');
     $(window).off('.quickerApiMenu');

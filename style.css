@@ -515,6 +515,16 @@
     white-space: nowrap;
 }
 
+.quicker-api__model-list > [hidden] {
+    display: none !important;
+}
+
+/* Long lists: skip layout/paint for rows scrolled out of view. */
+.quicker-api__model-manager .quicker-api__model-item {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 2.6rem;
+}
+
 .quicker-api__remote-model {
     grid-template-columns: auto minmax(0, 1fr) auto;
     cursor: pointer;
@@ -541,7 +551,33 @@
 }
 
 .quicker-api__chosen-model {
-    grid-template-columns: 1.7rem minmax(7rem, 1fr) auto auto;
+    /* The name input truncates by itself; never let it push the actions out of a narrow column. */
+    grid-template-columns: 1.7rem minmax(3rem, 1fr) auto auto;
+}
+
+.quicker-api__chosen-model > small {
+    white-space: nowrap;
+}
+
+.quicker-api__chosen-model > .text_pole {
+    min-width: 0;
+    width: 100%;
+}
+
+/* The manager column can be narrow even on wide screens: size by the list, not the viewport. */
+.quicker-api__model-list {
+    container-type: inline-size;
+}
+
+@container (max-width: 24rem) {
+    .quicker-api__chosen-model {
+        grid-template-columns: 1.7rem minmax(0, 1fr) auto;
+    }
+
+    .quicker-api__chosen-model > .quicker-api__item-actions {
+        grid-column: 2 / -1;
+        justify-content: flex-end;
+    }
 }
 
 .quicker-api__chosen-model > .text_pole[readonly] {
@@ -1200,7 +1236,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
 
     #quicker_api_profile_select,
     #quicker_api_model_control > .text_pole,
-    #quicker_api_model_control > select {
+    #quicker_api_model_control > .quicker-api__model-picker {
         flex: 1 1 100%;
         max-width: 100%;
     }
@@ -1325,7 +1361,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     flex-shrink: 0;
 }
 
-#quicker_api_model_control > select {
+#quicker_api_model_control > .quicker-api__model-picker {
     min-width: 0;
     flex: 1 1 12rem;
 }
@@ -1353,7 +1389,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
         display: contents;
     }
 
-    #quicker_api_model_control > select {
+    #quicker_api_model_control > .quicker-api__model-picker {
         grid-column: 1 / -1;
         grid-row: 2;
         width: 100%;
@@ -1382,5 +1418,322 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
         grid-column: 2 / -1;
         grid-row: 3;
         justify-self: end;
+    }
+}
+
+/* Searchable model picker: favorites / full list, with inline favorite stars. */
+.quicker-api__model-value {
+    display: none !important;
+}
+
+.quicker-api__model-picker,
+.quicker-api__model-dropdown {
+    --quicker-api-star: var(--golden, #f8d300);
+    --quicker-api-stale: color-mix(in srgb, #ffae35 82%, var(--SmartThemeBodyColor));
+}
+
+.quicker-api__model-picker {
+    position: relative;
+    min-width: 0;
+    flex: 1 1 12rem;
+}
+
+.quicker-api__model-picker button,
+.quicker-api__model-dropdown button {
+    white-space: nowrap;
+}
+
+.quicker-api__model-trigger {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    align-items: center;
+    gap: 0.45rem;
+    cursor: pointer;
+    text-align: left;
+    color: inherit;
+    font: inherit;
+}
+
+.quicker-api__model-trigger-label {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__model-trigger.is-empty .quicker-api__model-trigger-label {
+    opacity: 0.6;
+}
+
+.quicker-api__model-trigger-mark {
+    flex: 0 0 auto;
+    font-size: 0.85em;
+    opacity: 0.72;
+}
+
+.quicker-api__model-trigger-mark.is-favorite {
+    color: var(--quicker-api-star);
+    opacity: 1;
+}
+
+.quicker-api__model-trigger-mark.is-stale {
+    color: var(--quicker-api-stale);
+    opacity: 1;
+}
+
+.quicker-api__model-trigger-caret {
+    flex: 0 0 auto;
+    font-size: 0.75em;
+    opacity: 0.65;
+    transition: transform 0.15s ease;
+}
+
+.quicker-api__model-picker.is-open .quicker-api__model-trigger-caret {
+    transform: rotate(180deg);
+}
+
+/* Portaled to <body> while open and positioned from JS next to the trigger. */
+.quicker-api__model-portal {
+    display: contents !important;
+}
+
+.quicker-api__model-dropdown {
+    position: fixed;
+    z-index: 10020;
+    box-sizing: border-box;
+    display: flex;
+    max-height: min(70dvh, 30rem);
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.45rem;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    background: var(--SmartThemeBlurTintColor);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+    backdrop-filter: blur(var(--SmartThemeBlurStrength, 8px));
+    color: var(--SmartThemeBodyColor);
+}
+
+.quicker-api__model-dropdown[hidden] {
+    display: none;
+}
+
+.quicker-api__model-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.3rem;
+}
+
+.quicker-api__model-tabs > button {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    padding: 0.32rem 0.5rem;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    opacity: 0.7;
+}
+
+.quicker-api__model-tabs > button small {
+    opacity: 0.7;
+}
+
+.quicker-api__model-tabs > button.is-active {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 75%, var(--SmartThemeBorderColor));
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 18%, transparent);
+    opacity: 1;
+}
+
+.quicker-api__model-tabs > button[data-model-view="favorites"] > i {
+    color: var(--quicker-api-star);
+}
+
+.quicker-api__model-search-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.3rem;
+}
+
+.quicker-api__model-search-row > .quicker-api__model-search-input {
+    min-width: 0;
+    flex: 1 1 auto;
+    margin: 0;
+}
+
+.quicker-api__model-icon-button {
+    display: inline-flex;
+    width: 2.2rem;
+    min-width: 2.2rem;
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+}
+
+.quicker-api__model-options {
+    display: grid;
+    min-height: 0;
+    flex: 1 1 auto;
+    grid-template-columns: repeat(var(--quicker-api-model-columns, 1), minmax(0, 1fr));
+    grid-auto-rows: min-content;
+    align-content: start;
+    gap: 0.25rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.quicker-api__model-option {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.22rem 0.35rem 0.22rem 0.2rem;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 55%, transparent);
+    border-left-width: 3px;
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.quicker-api__model-option:hover,
+.quicker-api__model-option.is-active {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+}
+
+.quicker-api__model-option.is-active {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 55%, transparent);
+}
+
+/* Favorites stand out inside the full list with a gold accent bar. */
+.quicker-api__model-option.is-favorite {
+    border-left-color: var(--quicker-api-star);
+}
+
+.quicker-api__model-option.is-selected .quicker-api__model-option-name {
+    font-weight: 600;
+}
+
+.quicker-api__model-option.is-stale .quicker-api__model-option-name {
+    opacity: 0.75;
+    text-decoration: underline dotted var(--quicker-api-stale);
+}
+
+.quicker-api__model-option-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__model-option-badges {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+}
+
+.quicker-api__model-option-badges small {
+    opacity: 0.7;
+}
+
+.quicker-api__model-option-badges .fa-triangle-exclamation {
+    color: var(--quicker-api-stale);
+}
+
+.quicker-api__model-option-badges .fa-check {
+    color: var(--quicker-api-success, #35d06f);
+}
+
+.quicker-api__model-star {
+    display: inline-flex;
+    width: 1.45rem;
+    height: 1.45rem;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.55;
+}
+
+.quicker-api__model-star:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--quicker-api-star) 18%, transparent);
+    opacity: 1;
+}
+
+.quicker-api__model-star[aria-pressed="true"] {
+    color: var(--quicker-api-star);
+    opacity: 1;
+}
+
+.quicker-api__model-star:disabled {
+    cursor: default;
+    opacity: 0.25;
+}
+
+.quicker-api__model-add {
+    grid-column: 1 / -1;
+    grid-template-columns: auto minmax(0, 1fr);
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--SmartThemeBorderColor) 80%, transparent);
+}
+
+.quicker-api__model-add > i {
+    width: 1.6rem;
+    text-align: center;
+}
+
+.quicker-api__model-options > .quicker-api__empty-state {
+    grid-column: 1 / -1;
+    padding: 0.8rem 0.4rem;
+    opacity: 0.7;
+    text-align: center;
+}
+
+/* Model manager: stale favorites. */
+.quicker-api__stale-badge {
+    margin-left: 0.5rem;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, #ffae35 22%, transparent);
+    color: color-mix(in srgb, #ffae35 82%, var(--SmartThemeBodyColor));
+    font-size: 0.8em;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.quicker-api__stale-badge[hidden] {
+    display: none;
+}
+
+.quicker-api__chosen-model.is-stale {
+    border-color: color-mix(in srgb, #ffae35 70%, var(--SmartThemeBorderColor));
+    background: color-mix(in srgb, #ffae35 10%, var(--SmartThemeBlurTintColor));
+}
+
+.quicker-api__chosen-model.is-stale > small {
+    color: color-mix(in srgb, #ffae35 82%, var(--SmartThemeBodyColor));
+    opacity: 1;
+}
+
+@media (max-width: 760px) {
+    #quicker_api_model_control > .quicker-api__model-picker {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        width: 100%;
     }
 }

@@ -8,7 +8,7 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
     await run(`
         window.searchProfile = normalizeProfile({id:'search-profile',name:'Search models',format:'anthropic',endpoint:'',
             model:'GPT-4o',availableModels:['GPT-4o','Claude-3.5-Sonnet','custom-only'],
-            fetchedModels:${JSON.stringify(initialRemote)},fetchedFromEndpoint:'',customized:true,secretId:'test-secret'});
+            fetchedModels:${JSON.stringify(initialRemote)},fetchedFromEndpoint:'',modelListVersion:2,secretId:'test-secret'});
         settings().profiles=[searchProfile]; settings().presetBindings={}; settings().presetModels={};
         settings().selectedProfileId=searchProfile.id; settings().activeProfileId=searchProfile.id;
         oai_settings.chat_completion_source='claude'; oai_settings.claude_model='GPT-4o'; oai_settings.reverse_proxy='';
@@ -25,7 +25,7 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
             return searchFetchDelegate.apply(this,arguments);
         };
         window.searchRead=()=>({
-            rows:$('.quicker-api__remote-model').toArray().map(row=>({model:$(row).find('span').text(),checked:$(row).find('input').prop('checked')})),
+            rows:$('.quicker-api__remote-model:not([hidden])').toArray().map(row=>({model:$(row).find('span').text(),checked:$(row).find('input').prop('checked')})),
             chosen:$('.quicker-api__chosen-model input').toArray().map(input=>input.value),
             count:$('.quicker-api__model-search-count').text(),empty:$('.quicker-api__model-list').first().find('.quicker-api__empty-state').text(),
             query:$('.quicker-api__model-search input').val(),open:Boolean(document.querySelector('dialog[open]'))
@@ -34,7 +34,7 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
     `);
     const search = query => run(`$('.quicker-api__model-search input').val(${JSON.stringify(query)}).trigger('input'); searchRead()`);
     const action = name => run(`$('.quicker-api__manager-panel').first().find('[data-action="${name}"]').trigger('click'); searchRead()`);
-    const toggle = model => run(`$('.quicker-api__remote-model').filter((_,row)=>$(row).find('span').text()===${JSON.stringify(model)}).trigger('click'); searchRead()`);
+    const toggle = model => run(`$('.quicker-api__remote-model:not([hidden])').filter((_,row)=>$(row).find('span').text()===${JSON.stringify(model)}).trigger('click'); searchRead()`);
     const names = result => result.rows.map(row => row.model);
     const checked = result => result.rows.filter(row => row.checked).map(row => row.model);
     assert.deepEqual(names(await run('searchRead()')), initialRemote);
@@ -59,6 +59,7 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
     log('Enter in model search cannot reach the host popup confirmation handler');
 
     await search('gpt');
+    await run(`window.searchRowNodes=[...document.querySelectorAll('.quicker-api__remote-model')]; true`);
     const allGpt = await action('all');
     assert.deepEqual(checked(allGpt), ['GPT-4o', 'gpt-4.1-mini']);
     assert.ok(!allGpt.chosen.includes('claude-haiku') && !allGpt.chosen.includes('Gemini-2.5-Pro'));
@@ -67,24 +68,27 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
     await search('gemini'); await toggle('Gemini-2.5-Pro');
     assert.deepEqual(checked(await search('gpt')), ['GPT-4o', 'gpt-4.1-mini']);
     const noGpt = await action('none');
-    assert.deepEqual(checked(noGpt), ['GPT-4o']);
+    assert.equal(await run(`(() => { const now=[...document.querySelectorAll('.quicker-api__remote-model')]; return now.length===searchRowNodes.length && now.every((row,i)=>row===searchRowNodes[i]); })()`), true,
+        'selecting, bulk actions and searching update the existing remote rows instead of rebuilding them');
+    assert.deepEqual(checked(noGpt), []);
     for (const model of ['Claude-3.5-Sonnet', 'claude-haiku', 'Gemini-2.5-Pro', 'custom-only']) assert.ok(noGpt.chosen.includes(model));
     await search('claude');
     const inverted = await action('invert');
     assert.deepEqual(checked(inverted), []);
-    for (const model of ['GPT-4o', 'Gemini-2.5-Pro', 'custom-only']) assert.ok(inverted.chosen.includes(model));
+    for (const model of ['Gemini-2.5-Pro', 'custom-only']) assert.ok(inverted.chosen.includes(model));
+    assert.ok(!inverted.chosen.includes('GPT-4o'));
     assert.deepEqual(checked(await action('invert')), ['Claude-3.5-Sonnet', 'claude-haiku']);
     await search('gpt');
     assert.deepEqual(checked(await action('invert')), ['GPT-4o', 'gpt-4.1-mini']);
     const noMatch = await search('no-such-model');
     for (const name of ['all', 'invert', 'none']) assert.deepEqual((await action(name)).chosen, noMatch.chosen);
-    log('filtered all/invert/none only affect matching models, preserve hidden selections and protect the current model');
+    log('filtered all/invert/none only affect matching models and preserve hidden selections; favorites are independent of the current model');
 
     await search('');
-    assert.deepEqual((await action('none')).chosen.slice().sort(), ['GPT-4o', 'custom-only'].sort());
+    assert.deepEqual((await action('none')).chosen.slice().sort(), ['custom-only']);
     const all = await action('all');
     assert.deepEqual(all.chosen.slice().sort(), [...initialRemote, 'custom-only'].sort());
-    assert.deepEqual((await action('invert')).chosen.slice().sort(), ['GPT-4o', 'custom-only'].sort());
+    assert.deepEqual((await action('invert')).chosen.slice().sort(), ['custom-only']);
     assert.equal(await run('JSON.stringify(searchProfile)===searchOriginalProfile'), true);
     await run('[...ownedPopups][0].completeCancelled(); searchTask');
     assert.equal(await run('JSON.stringify(searchProfile)===searchOriginalProfile'), true);
@@ -144,7 +148,7 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
     assert.ok(await run(`profiles().find(p=>p.id==='search-profile').availableModels.includes('New-Wide-Model')`));
     assert.deepEqual(await run(`profiles().find(p=>p.id==='search-profile').fetchedModels`), refreshedRemote);
     await run('window.searchTask=manageCustomModels(); true');
-    assert.deepEqual(await run(`$('.quicker-api__remote-model span').toArray().map(span=>span.textContent)`), refreshedRemote);
+    assert.deepEqual(await run(`$('.quicker-api__remote-model:not([hidden]) span').toArray().map(span=>span.textContent)`), refreshedRemote);
     assert.equal(await run(`$('.quicker-api__model-search input').val()`), '');
     await run('[...ownedPopups][0].completeCancelled(); searchTask');
     log('confirm persists selections and the full fetched snapshot, not the filtered subset; a real reload retains them with a fresh empty search');
