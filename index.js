@@ -2406,7 +2406,9 @@ async function copySelectedProfile() {
 async function deleteSelectedProfile() {
     const profile = selectedProfile();
     if (!profile) return;
+    const usedBy = settings().quickActions.filter(action => action.profileId === profile.id).map((action, index) => quickActionDisplayName(action, index));
     const content = $('<div>').append($('<p>').text(`删除 Profile“${profile.name}”？`), $('<p>').text('不会删除任何原生密钥；相关原生预设绑定会被解除。'));
+    if (usedBy.length) content.append($('<p>').text(`便捷方案「${usedBy.join('、')}」使用了该配置，删除后会被标记为失效，需要重新选择配置。`));
     if (!await callQuickerPopup(content, POPUP_TYPE.CONFIRM)) return;
     settings().profiles = profiles().filter(item => item.id !== profile.id);
     for (const [name, id] of Object.entries(settings().presetBindings)) {
@@ -3141,6 +3143,19 @@ function quickActionDisplayName(action, index = 0) {
     return sanitizeName(action.name) || `方案${index + 1}`;
 }
 
+function nativePresetNames() {
+    return $('#settings_preset_openai option').map((_, option) => normalizeText(option.textContent)).get().filter(Boolean);
+}
+
+// References a scheme holds that no longer resolve. A scheme with problems is
+// kept (and flagged) but never executed until it is fixed.
+function quickActionProblems(action) {
+    const problems = [];
+    if (action?.profileId && !profiles().some(profile => profile.id === action.profileId)) problems.push('引用的 API 配置已不存在');
+    if (action?.preset && !nativePresetNames().includes(action.preset)) problems.push(`预设“${action.preset}”已不存在`);
+    return problems;
+}
+
 // Value the preset would send: the scheme's own preset, otherwise the current one.
 function presetParameterValue(presetName, spec) {
     const preset = presetName ? nativePresetByName(presetName) : null;
@@ -3211,7 +3226,7 @@ function escapeHtml(value) {
 }
 
 function presetOptionsHtml(selected = '') {
-    const names = $('#settings_preset_openai option').map((_, option) => normalizeText(option.textContent)).get().filter(Boolean);
+    const names = nativePresetNames();
     const missing = selected && !names.includes(selected)
         ? [`<option value="${escapeHtml(selected)}" selected>⚠ 已不存在：${escapeHtml(selected)}</option>`]
         : [];
@@ -3399,6 +3414,10 @@ async function manageQuickActions() {
         const cancelScheme = $('<button type="button" class="menu_button"><span>取消</span></button>');
         saveScheme.on('click', () => {
             if (!detailDraft.preset && !detailDraft.profileId && !detailDraft.model) return toastr.warning('方案至少需要 preset、Profile 或 model 中的一项。');
+            // Only the scheme being confirmed is validated; other schemes keep
+            // their (possibly stale) references and are flagged in the list.
+            const problems = quickActionProblems(detailDraft);
+            if (problems.length) return toastr.warning(`${problems.join('；')}，请重新选择后再保存方案。`);
             const index = globalDraft.findIndex(item => item.id === selectedId);
             if (index < 0) return;
             globalDraft[index] = normalizeQuickAction(structuredClone(detailDraft), index);
@@ -3426,6 +3445,12 @@ async function manageQuickActions() {
                 .toggleClass('is-selected', action.id === selectedId)
                 .attr('aria-selected', action.id === selectedId);
             const name = $('<span class="quicker-api__quick-select">').text(quickActionDisplayName(action, index)).attr('title', quickActionDisplayName(action, index));
+            const problems = quickActionProblems(action);
+            if (problems.length) {
+                row.addClass('is-broken');
+                name.prepend($('<i class="fa-solid fa-triangle-exclamation quicker-api__quick-broken" aria-hidden="true"></i>'))
+                    .attr('title', `${quickActionDisplayName(action, index)}：${problems.join('；')}`);
+            }
             const makeRowButton = (label, icon, disabled, handler, danger = false) => $('<button type="button" class="menu_button">')
                 .toggleClass('quicker-api__delete-button', danger).attr({ title: label, 'aria-label': label }).prop('disabled', disabled)
                 .append($(`<i class="fa-solid ${icon}"></i>`)).on('click', event => { event.stopPropagation(); handler(); });
@@ -3468,10 +3493,7 @@ async function manageQuickActions() {
         if (detailDraft && JSON.stringify(detailDraft) !== detailBaseline) return toastr.warning('当前方案还有未确认的修改，请先点击“保存方案”或“取消”。');
         const invalid = globalDraft.find(action => !action.preset && !action.profileId && !action.model);
         if (invalid) return toastr.warning('请先点击“保存方案”确认每个方案；每项至少需要 preset、Profile 或 model。');
-        const validProfileIds = new Set(profiles().map(profile => profile.id));
-        if (globalDraft.some(action => action.profileId && !validProfileIds.has(action.profileId))) return toastr.warning('方案引用了已不存在的 Profile，请重新选择并保存方案。');
-        const validPresetNames = new Set($('#settings_preset_openai option').map((_, option) => normalizeText(option.textContent)).get());
-        if (globalDraft.some(action => action.preset && !validPresetNames.has(action.preset))) return toastr.warning('方案引用了已不存在的 preset，请重新选择并保存方案。');
+        const broken = globalDraft.filter(action => quickActionProblems(action).length).length;
         globalDraft.forEach((action, index) => {
             action.name = sanitizeName(action.name) || `方案${index + 1}`;
             action.sequence = index;
@@ -3494,6 +3516,7 @@ async function manageQuickActions() {
         if (saved && managerOpen) {
             ensureQuickActionEntries();
             toastr.success('便捷方案已保存到 SillyTavern。');
+            if (broken) toastr.warning(`${broken} 个方案引用的配置或预设已不存在（列表中以 ⚠ 标出），在修复前无法执行。`);
             void popup.completeAffirmative();
         }
     });
@@ -3594,6 +3617,11 @@ async function applyProfileById(profileId, token = quickActionTransaction, { app
 async function runQuickAction(action, token) {
     if (extensionDisabled || teardownPending || token !== quickActionTransaction) return;
     closeQuickActionMenu();
+    const problems = quickActionProblems(action);
+    if (problems.length) {
+        toastr.error(`${quickActionDisplayName(action)}无法执行：${problems.join('；')}。请在“便捷按钮管理”中重新选择。`);
+        return;
+    }
     beginPresetTransition();
     quickActionBlockingToken = token;
     try {
@@ -3700,11 +3728,12 @@ function openQuickActionMenu(anchor, placement) {
     actions.forEach((action, index) => {
         const name = quickActionDisplayName(action, index);
         const inUse = action === current;
+        const broken = quickActionProblems(action).length > 0;
         menu.append($('<li class="list-group-item ctx-item" role="listitem" tabindex="0" data-quicker-api-actionable="true">')
-            .toggleClass('is-active', inUse)
-            .attr({ title: inUse ? `${name}（当前正在使用）` : name, 'aria-current': inUse ? 'true' : null })
+            .toggleClass('is-active', inUse).toggleClass('is-broken', broken)
+            .attr({ title: broken ? `${name}（引用的配置或预设已不存在）` : inUse ? `${name}（当前正在使用）` : name, 'aria-current': inUse ? 'true' : null })
             .append(
-                $('<div class="qr--button-icon fa-solid fa-check">').toggleClass('qr--hidden', !inUse),
+                $('<div class="qr--button-icon fa-solid">').addClass(broken ? 'fa-triangle-exclamation' : 'fa-check').toggleClass('qr--hidden', !inUse && !broken),
                 $('<div class="qr--button-label">').text(name),
                 action.params?.enabled ? $('<div class="quicker-api__quick-menu-params fa-solid fa-sliders" title="此方案自定义了预设参数">') : null,
             )

@@ -1961,3 +1961,13 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     opacity: 0.4;
     cursor: default;
 }
+
+/* v3.10.1 引用失效的便捷方案 */
+.quicker-api__quick-item.is-broken .quicker-api__quick-select,
+.quicker-api__quick-menu > .list-group-item.is-broken {
+    color: orange;
+}
+
+.quicker-api__quick-broken {
+    margin-right: 0.35rem;
+}

@@ -132,4 +132,33 @@ export async function runV310Regressions({ page, log }) {
     assert.equal(await run(`[$('.quicker-api__quick-params-rows').prop('hidden'), $('.quicker-api__quick-editor').hasClass('has-unsaved-detail')].join()`), 'true,true');
     await run(`$('dialog.popup').toArray().forEach(d => d.remove()); ownedPopups.clear()`);
     log('the scheme editor exposes the four parameters with per-parameter send switches behind a default-off toggle');
+
+    // A scheme that still points at a deleted Profile must not block creating
+    // or saving other schemes (with or without a preset).
+    await run(`
+        settings().quickActions=[normalizeQuickAction({id:'qa-stale',name:'Stale',preset:'A',profileId:'deleted-profile',model:'m',sequence:0})];
+        messages.length=0; window.v310Persist=persistSettingsNow; persistSettingsNow=async()=>true;
+        void manageQuickActions(); new Promise(r => setTimeout(r, 30))`);
+    assert.deepEqual(await run(`[$('.quicker-api__quick-item').eq(0).hasClass('is-broken'), $('.quicker-api__quick-item').eq(0).attr('class').includes('is-broken')]`), [true, true]);
+    const addScheme = async preset => {
+        await run(`$('.quicker-api__quick-list-toolbar button').trigger('click')`);
+        await run(`(() => { const sel=$('.quicker-api__quick-editor select').eq(0); sel.val(${JSON.stringify(preset)}).trigger('change');
+            $('.quicker-api__quick-editor select').eq(1).val('v310-a').trigger('change');
+            $('.quicker-api__quick-editor .quicker-api__quick-editor-actions .quicker-api__save-button').trigger('click'); })()`);
+    };
+    await addScheme('');
+    await addScheme('B');
+    await run(`$('.quicker-api__quick-header .quicker-api__save-button').trigger('click'); new Promise(r => setTimeout(r, 50))`);
+    const result = await run(`({actions:settings().quickActions.map(a=>({preset:a.preset,profileId:a.profileId})), warnings:messages.filter(m=>m.level==='warning').map(m=>m.message), open:!!document.querySelector('.quicker-api__quick-manager')})`);
+    assert.deepEqual(result.actions, [{ preset: 'A', profileId: 'deleted-profile' }, { preset: '', profileId: 'v310-a' }, { preset: 'B', profileId: 'v310-a' }]);
+    assert.ok(!result.warnings.some(m => m.includes('请重新选择并保存方案')), `unexpected blocking warning: ${result.warnings}`);
+    assert.ok(result.warnings.some(m => m.includes('1 个方案')), 'the stale scheme is reported, not blocking');
+    assert.equal(result.open, false, 'the manager saved and closed');
+    await run(`messages.length=0; runQuickAction(settings().quickActions[0], ++quickActionTransaction)`);
+    assert.ok(await run(`messages.some(m=>m.level==='error' && m.message.includes('引用的 API 配置已不存在'))`), 'a broken scheme is refused with a clear reason');
+    await run(`messages.length=0; void manageQuickActions(); new Promise(r => setTimeout(r, 30))`);
+    await run(`$('.quicker-api__quick-item').eq(0).trigger('click'); $('.quicker-api__quick-editor-actions .quicker-api__save-button').trigger('click')`);
+    assert.ok(await run(`messages.some(m=>m.level==='warning' && m.message.includes('引用的 API 配置已不存在'))`), 'confirming the broken scheme itself still asks to fix it');
+    await run(`$('dialog.popup').toArray().forEach(d => d.remove()); ownedPopups.clear(); persistSettingsNow=v310Persist`);
+    log('a scheme referencing a deleted Profile is flagged but no longer blocks saving new schemes with or without a preset');
 }
