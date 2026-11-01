@@ -10,6 +10,7 @@ import { runCompatibilityRegressions } from './compatibility-regression.mjs';
 import { runPresetRegressions } from './preset-regression.mjs';
 import { runModelSearchRegressions } from './model-search-regression.mjs';
 import { runModelPickerRegressions } from './model-picker-regression.mjs';
+import { runV310Regressions } from './v310-regression.mjs';
 
 // Run from the plugin: node tests/regression.mjs
 // Override CHROME_PATH and ST_PUBLIC_DIR when the host/browser is elsewhere.
@@ -95,6 +96,13 @@ const server = createServer(async (req, res) => {
                 res.end(JSON.stringify({ name: body.name })); return;
             case '/api/secrets/read':
                 res.end(JSON.stringify(state.secrets || Object.fromEntries(['api_key_custom', 'api_key_claude', 'api_key_makersuite'].map(key => [key, [{ id: 'test-secret', active: true }]])))); return;
+            case '/api/secrets/write': {
+                state.secrets ??= Object.fromEntries(['api_key_custom', 'api_key_claude', 'api_key_makersuite'].map(key => [key, [{ id: 'test-secret', active: true }]]));
+                const id = `written-${state.requests.length}`;
+                for (const entry of state.secrets[body.key] ??= []) entry.active = false;
+                state.secrets[body.key].push({ id, active: true, label: body.label });
+                res.end(JSON.stringify({ id })); return;
+            }
             case '/api/secrets/rotate':
                 if (state.failNextRotation) { state.failNextRotation = false; res.writeHead(500).end('{}'); return; }
                 if (state.secrets?.[body.key]) {
@@ -391,6 +399,7 @@ try {
     await runModelPickerRegressions({ page: modelPickerPage, log,
         setViewport: (width, height) => cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }, modelPickerPage.sessionId),
     });
+    await runV310Regressions({ page: await newPage(), log });
     assert.deepEqual(exceptions, [], `Unexpected browser exceptions: ${JSON.stringify(exceptions)}`);
     console.log(`\n${passed} regression checks passed (${host}). Host APIs and account data were simulated in memory.`);
 } finally {

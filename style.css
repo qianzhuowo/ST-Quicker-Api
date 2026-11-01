@@ -1834,3 +1834,130 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
         width: 100%;
     }
 }
+
+/* v3.10 便捷菜单：当前正在使用的方案 */
+.quicker-api__quick-menu > .list-group-item.is-active {
+    border-left: 3px solid var(--SmartThemeQuoteColor);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 18%, transparent);
+    font-weight: 700;
+    opacity: 1;
+}
+
+.quicker-api__quick-menu > .list-group-item.is-active .qr--button-icon {
+    color: var(--SmartThemeQuoteColor);
+}
+
+.quicker-api__quick-menu .quicker-api__quick-menu-params {
+    flex: 0 0 auto;
+    margin-left: auto;
+    opacity: 0.6;
+    font-size: 0.85em;
+}
+
+/* v3.10 便捷方案：预设参数 */
+.quicker-api__quick-params {
+    min-width: 0;
+    margin: 0;
+    padding: 0.35rem 0.55rem 0.5rem;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+}
+
+.quicker-api__quick-params.is-enabled {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 70%, var(--SmartThemeBorderColor));
+}
+
+.quicker-api__quick-params > legend {
+    padding: 0 0.3rem;
+}
+
+.quicker-api__quick-params-toggle {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    font-weight: 600;
+}
+
+.quicker-api__quick-params-toggle small {
+    font-weight: 400;
+    opacity: 0.7;
+}
+
+.quicker-api__quick-params-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.quicker-api__quick-params-rows[hidden] {
+    display: none;
+}
+
+.quicker-api__quick-param {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: 7rem minmax(4rem, 1fr) 5rem minmax(6rem, auto);
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.quicker-api__quick-param > .checkbox_label {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+}
+
+.quicker-api__quick-param > input[type="range"] {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+.quicker-api__quick-param > .text_pole {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+.quicker-api__quick-param-hint,
+.quicker-api__quick-params-help {
+    opacity: 0.7;
+    white-space: nowrap;
+}
+
+.quicker-api__quick-params-help {
+    white-space: normal;
+}
+
+.quicker-api__quick-param.is-off > :not(.checkbox_label) {
+    opacity: 0.45;
+}
+
+@media (max-width: 760px) {
+    .quicker-api__quick-param {
+        grid-template-columns: minmax(0, 1fr) 5rem;
+    }
+
+    .quicker-api__quick-param > input[type="range"] {
+        grid-column: 1 / -1;
+        grid-row: 2;
+    }
+
+    .quicker-api__quick-param-hint {
+        grid-column: 1 / -1;
+    }
+}
+
+/* v3.10 下拉列表：清理失效收藏 */
+.quicker-api__model-prune.has-stale {
+    border-color: color-mix(in srgb, orange 70%, var(--SmartThemeBorderColor));
+    color: orange;
+}
+
+.quicker-api__model-prune:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
