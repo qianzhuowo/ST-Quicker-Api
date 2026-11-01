@@ -1971,3 +1971,10 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
 .quicker-api__quick-broken {
     margin-right: 0.35rem;
 }
+
+/* v3.10.1 手机端：宿主 Quick Reply 在 max-width:1000px 时给
+   .list-group .list-group-item.ctx-item 加了 padding:1em，会撑大便捷菜单的行距。
+   这里用更高优先级恢复与 PC 一致的紧凑间距。 */
+.list-group.quicker-api__quick-menu > .list-group-item.ctx-item {
+    padding: 5px;
+}

@@ -2432,15 +2432,18 @@ async function deleteSelectedProfile() {
 
 
 async function findMatchingSecret(key, value) {
-    if (!await canReadSecretPlaintext()) return { entry: null, exposureAvailable: false };
+    if (!await canReadSecretPlaintext()) return { entry: null, exposureAvailable: false, exposureBlocked: 'not-allowed' };
+    const entries = getSecretEntries(key);
+    // Nothing saved yet means there is nothing to compare against.
+    if (!entries.length) return { entry: null, exposureAvailable: true };
     let readable = false;
-    for (const entry of getSecretEntries(key)) {
+    for (const entry of entries) {
         const existing = await findSecretBounded(key, entry.id);
         if (existing === null) continue;
         readable = true;
         if (existing === value) return { entry, exposureAvailable: true };
     }
-    return { entry: null, exposureAvailable: readable };
+    return { entry: null, exposureAvailable: readable, exposureBlocked: readable ? '' : 'lookup-failed' };
 }
 
 async function ensureSecret(key, value, label) {
@@ -2454,7 +2457,7 @@ async function ensureSecret(key, value, label) {
     const id = await writeSecretVerified(key, normalized, label);
     const state = id ? await readAuthoritativeSecretState() : null;
     const verified = Boolean(id && state?.[key]?.some(entry => entry.id === id && entry.active));
-    return { id: verified ? id : '', reused: false, exposureAvailable: match.exposureAvailable };
+    return { id: verified ? id : '', reused: false, exposureAvailable: match.exposureAvailable, exposureBlocked: match.exposureBlocked || '' };
 }
 
 async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat = profile?.format, endpointOverride = null) {
@@ -2495,7 +2498,11 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
     profile.needsSecret = false;
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
-    if (!result.exposureAvailable) toastr.warning('凭据已保存；findSecret 无权限，无法检查历史密钥是否同值。');
+    if (!result.exposureAvailable) {
+        toastr.warning(result.exposureBlocked === 'not-allowed'
+            ? '凭据已保存；未允许查看密钥，无法检查历史密钥是否同值。'
+            : '凭据已保存；读取历史密钥失败，无法检查是否同值。');
+    }
     return true;
 }
 

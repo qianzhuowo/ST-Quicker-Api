@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 // v3.10: named draft channels, external /model sync, dropdown stale cleanup,
 // per-scheme sampling parameters and the in-use quick action marker.
-export async function runV310Regressions({ page, log }) {
+export async function runV310Regressions({ page, log, setViewport }) {
     const run = page.evaluate;
     await run(`
         window.v310Base = normalizeProfile({id:'v310-a',name:'Channel A',format:'openai',endpoint:'https://a.invalid/v1',model:'model-a',
@@ -115,6 +115,35 @@ export async function runV310Regressions({ page, log }) {
     assert.deepEqual(menu.rows, [{ name: 'Other', active: false, current: null, params: false }, { name: 'Mine', active: true, current: 'true', params: true }]);
     assert.equal(menu.border, '3px');
     log('the quick menu highlights the scheme matching the live preset/channel/model and marks schemes with parameters');
+
+    // Mobile: the host Quick Reply CSS pads .list-group-item.ctx-item by 1em
+    // below 1000px. The quick menu must keep the same compact rows as desktop.
+    const measureRows = () => run(`(() => { document.body.insertAdjacentHTML('beforeend','<button id="v310_anchor">Q</button>'); openQuickActionMenu(document.getElementById('v310_anchor'), 'rightSendForm');
+        const item = document.querySelector('.quicker-api__quick-menu .ctx-item'); const style = getComputedStyle(item);
+        const result = { padding: style.paddingTop, height: Math.round(item.getBoundingClientRect().height) };
+        closeQuickActionMenu(); document.getElementById('v310_anchor').remove(); return result; })()`);
+    await setViewport(1280, 800, false);
+    await run('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))');
+    const desktopRow = await measureRows();
+    await setViewport(390, 844, true);
+    await run('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))');
+    const hostMobileRule = await run(`[...document.styleSheets].some(sheet => { try { return [...sheet.cssRules].some(rule => rule.media && /1000px/.test(rule.media.mediaText) && /list-group-item\\.ctx-item/.test(rule.cssText)); } catch { return false; } })`);
+    const mobileRow = await measureRows();
+    await setViewport(1280, 800, false);
+    assert.ok(hostMobileRule, 'the host Quick Reply mobile rule is loaded, so this check is meaningful');
+    assert.equal(mobileRow.padding, desktopRow.padding, `mobile row padding ${mobileRow.padding} matches desktop ${desktopRow.padding}`);
+    assert.equal(mobileRow.height, desktopRow.height, `mobile row height ${mobileRow.height}px matches desktop ${desktopRow.height}px`);
+    log(`quick menu rows stay compact on mobile (${mobileRow.height}px, same as desktop) despite the host Quick Reply mobile padding`);
+
+    // Secret exposure disabled: the reason is named plainly.
+    const exposure = await run(`(async () => {
+        const original = canReadSecretPlaintext;
+        canReadSecretPlaintext = async () => false;
+        try { return await findMatchingSecret(SECRET_KEYS.CUSTOM, 'x'); } finally { canReadSecretPlaintext = original; }
+    })()`);
+    assert.deepEqual(exposure, { entry: null, exposureAvailable: false, exposureBlocked: 'not-allowed' });
+    assert.ok((await import('node:fs')).readFileSync(new URL('../index.js', import.meta.url), 'utf8').includes('未允许查看密钥，无法检查历史密钥是否同值'));
+    log('when key exposure is not allowed, the save warning says so instead of naming findSecret');
 
     await run(`$('#custom_model_id').val('model-other').trigger('input'); new Promise(r => setTimeout(r, 30))`);
     const after = await run(`fixtureGenerationData().then(data => ({temperature:data.temperature, top_p:data.top_p, active:activeQuickAction()?.id ?? null}))`);
