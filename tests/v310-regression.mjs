@@ -161,4 +161,16 @@ export async function runV310Regressions({ page, log }) {
     assert.ok(await run(`messages.some(m=>m.level==='warning' && m.message.includes('引用的 API 配置已不存在'))`), 'confirming the broken scheme itself still asks to fix it');
     await run(`$('dialog.popup').toArray().forEach(d => d.remove()); ownedPopups.clear(); persistSettingsNow=v310Persist`);
     log('a scheme referencing a deleted Profile is flagged but no longer blocks saving new schemes with or without a preset');
+
+    // TauriTavern renamed the proxy password input; the host field must follow.
+    const proxyField = await run(`(() => {
+        const id = $('#openai_proxy_access_key').length ? 'openai_proxy_access_key' : 'openai_proxy_password';
+        oai_settings.proxy_password = 'old';
+        setNativeProxyPasswordField('proxy-secret-1');
+        const viaHelper = [id, $('#' + id).val(), oai_settings.proxy_password];
+        restoreNative({ ...snapshotNative(), proxy_password: 'restored-2' });
+        return [...viaHelper, $('#' + id).val(), oai_settings.proxy_password];
+    })()`);
+    assert.deepEqual(proxyField.slice(1), ['proxy-secret-1', 'proxy-secret-1', 'restored-2', 'restored-2'], `proxy password field ${proxyField[0]} stays in sync`);
+    log(`the proxy password reaches the host's own input (#${proxyField[0]}) when applied and restored`);
 }

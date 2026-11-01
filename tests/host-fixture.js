@@ -124,7 +124,7 @@ $('#chat_completion_source').on('change', function () {
         if (scopedHost && this.value === 'custom') oai_settings.custom_api_format = 'openai_compat';
     }
 });
-for (const [id, key] of [['opencode_endpoint', 'opencode_endpoint'], ['opencode_api_format', 'opencode_api_format'], ['custom_api_url_text', 'custom_url'], ['openai_reverse_proxy', 'reverse_proxy'], ['openai_proxy_password', 'proxy_password']]) {
+for (const [id, key] of [['opencode_endpoint', 'opencode_endpoint'], ['opencode_api_format', 'opencode_api_format'], ['custom_api_url_text', 'custom_url'], ['openai_reverse_proxy', 'reverse_proxy'], [scopedHost ? 'openai_proxy_access_key' : 'openai_proxy_password', 'proxy_password']]) {
     $(`#${id}`).val(oai_settings[key] || '').on('input', function () { oai_settings[key] = this.value; });
 }
 function bindFixtureParameterInputs() {

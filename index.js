@@ -1630,6 +1630,13 @@ function restoreNative(snapshot) {
     withEditorSync(() => restoreNativeFields(snapshot));
 }
 
+// ST names the proxy password input #openai_proxy_password; TauriTavern renamed it
+// #openai_proxy_access_key. Both hosts' input handlers copy the field into
+// oai_settings.proxy_password, so the same trigger keeps either host in sync.
+function setNativeProxyPasswordField(value) {
+    $('#openai_proxy_password, #openai_proxy_access_key').val(value ?? '').trigger('input');
+}
+
 function restoreNativeFields(snapshot) {
     oai_settings.custom_url = snapshot.custom_url;
     oai_settings.custom_model = snapshot.custom_model;
@@ -1640,7 +1647,7 @@ function restoreNativeFields(snapshot) {
     $('#custom_api_url_text').val(snapshot.custom_url).trigger('input');
     $('#custom_model_id').val(snapshot.custom_model).trigger('input');
     $('#openai_reverse_proxy').val(snapshot.reverse_proxy).trigger('input');
-    $('#openai_proxy_password').val(snapshot.proxy_password).trigger('input');
+    setNativeProxyPasswordField(snapshot.proxy_password);
     $('#model_claude_select').val(snapshot.claude_model).trigger('change');
     $('#model_google_select').val(snapshot.google_model).trigger('change');
     platform.restoreConnectionState(snapshot.connection);
@@ -1712,7 +1719,7 @@ function writeNativeFields(profile, proxyPassword, applyModel) {
     applyNativeAdditionalParameters(profile);
     if (profile.format === 'anthropic' || profile.format === 'gemini') {
         oai_settings.proxy_password = proxyPassword;
-        $('#openai_proxy_password').val(proxyPassword).trigger('input');
+        setNativeProxyPasswordField(proxyPassword);
     }
     platform.selectSource(config.source, config.apiFormat);
 }
@@ -2465,7 +2472,7 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
         profile.secretId = '';
         profile.needsSecret = false;
         oai_settings.proxy_password = value;
-        $('#openai_proxy_password').val(value).trigger('input');
+        setNativeProxyPasswordField(value);
         profile.updatedAt = new Date().toISOString();
         scheduleSettingsSave();
         return true;

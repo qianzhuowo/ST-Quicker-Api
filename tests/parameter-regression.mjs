@@ -106,7 +106,7 @@ export async function runParameterRegressions({ page, state, scopedHost, log }) 
     await run(`applyProfileById('params-a')`);
     if (scopedHost) await run(`$('#chat_completion_source').val('custom_openai_responses').trigger('change')`);
     const before = await run('snapshotNative()');
-    await run(`$('#openai_proxy_password').one('input.fixtureRollback', () => { throw new Error('Synthetic apply failure'); })`);
+    await run(`$('#openai_proxy_password, #openai_proxy_access_key').one('input.fixtureRollback', () => { throw new Error('Synthetic apply failure'); })`);
     assert.equal(await run(`applyProfileById('params-claude')`), false);
     assert.deepEqual(await run('snapshotNative()'), before);
     if (scopedHost) assert.equal(await run(`$('#chat_completion_source').val()`), 'custom_openai_responses');
