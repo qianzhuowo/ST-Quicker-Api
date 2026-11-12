@@ -207,6 +207,17 @@ function finishSettingsSave(snapshot, success) {
     }
 }
 
+// The confirmation deadline only covers the host never sending this snapshot.
+// Once a save request carrying it is on the wire, its own response decides:
+// large settings over a remote/mobile link can legitimately take longer.
+function markSettingsSaveSent(snapshot) {
+    if (extensionDisabled || teardownPending || !snapshot) return;
+    if (snapshot === JSON.stringify(settings())) clearTimeout(settingsSaveTimer);
+    for (const waiter of settingsSaveWaiters) {
+        if (waiter.snapshot === snapshot) clearTimeout(waiter.timer);
+    }
+}
+
 function scheduleSettingsSave() {
     if (extensionDisabled || teardownPending) return;
     const snapshot = JSON.stringify(settings());
@@ -226,10 +237,10 @@ async function persistSettingsNow() {
     // Verify the exact plugin snapshot through the host's full/delta save
     // response. A save event or a fulfilled promise alone is not confirmation.
     return await new Promise(resolve => {
-        const waiter = { snapshot, complete: null };
-        const timer = setTimeout(() => { finishSettingsSave(snapshot, false); waiter.complete(false); }, 15000);
+        const waiter = { snapshot, complete: null, timer: null };
+        waiter.timer = setTimeout(() => { finishSettingsSave(snapshot, false); waiter.complete(false); }, 15000);
         waiter.complete = success => {
-            clearTimeout(timer);
+            clearTimeout(waiter.timer);
             settingsSaveWaiters.delete(waiter);
             resolve(success);
         };
@@ -4114,6 +4125,7 @@ function installPresetSaveObserver() {
                 latestPresetSaves.set(normalizeText(body.name), intent.sequence);
             }
         }
+        if (settingsObservation) markSettingsSaveSent(settingsObservation.snapshot);
         // Keep a stable delegate: later extensions may still call this wrapper
         // after teardown. Never mutate the request, response, or their bodies.
         let response;

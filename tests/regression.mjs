@@ -368,6 +368,17 @@ try {
     assert.equal(await run('settingsSaveState'), 'saved');
     log('settings failure is surfaced and retry waits for the successful server response');
 
+    // Large settings over a remote link: the request is sent promptly but the
+    // response takes longer than the send deadline. That is not a failure.
+    state.delaySettings = 16000;
+    const warningsBeforeSlowSave = await run(`messages.filter(item => item.message.includes('请检查连接并重试保存')).length`);
+    assert.equal(await run(`settings().quickUrls.push({id:'slow', name:'Slow',url:'https://slow.invalid/v1'}); scheduleSettingsSave(); persistSettingsNow()`), true);
+    state.delaySettings = 0;
+    assert.equal(await run('settingsSaveState'), 'saved');
+    assert.equal(await run(`messages.filter(item => item.message.includes('请检查连接并重试保存')).length`), warningsBeforeSlowSave);
+    assert.equal(await run(`settings().quickUrls.pop(); persistSettingsNow()`), true);
+    log('a sent save slower than the send deadline is confirmed by its response without a false warning');
+
     const other = await newPage();
     assert.deepEqual(await other.evaluate('[panelCollapsed, settings().presetModels.A.model, settings().quickUrls.length, settings().quickActions.length]'), [false, 'model-c', 2, 8]);
     assert.deepEqual(await run('[panelCollapsed, localStorage.getItem(PANEL_COLLAPSED_STORAGE_KEY)]'), [true, 'true']);
