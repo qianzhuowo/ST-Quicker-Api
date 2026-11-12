@@ -121,6 +121,9 @@ const DEFAULT_SETTINGS = {
     // used only while the live connection still matches it.
     activeQuickActionId: '',
     quickUrls: [],
+    // The user switched back to the host's own connection UI: the panel hides
+    // and stops managing the connection until it is switched back on.
+    nativeUi: false,
 };
 
 let operationQueue = Promise.resolve();
@@ -497,6 +500,7 @@ function initializeSettings() {
         changed = true;
     }
     value.blockedSecretKeys = value.blockedSecretKeys && typeof value.blockedSecretKeys === 'object' ? value.blockedSecretKeys : {};
+    value.nativeUi = value.nativeUi === true;
     value.quickActionPlacement = ['leftSendForm', 'rightSendForm', 'qrButtons', 'disabled'].includes(value.quickActionPlacement)
         ? value.quickActionPlacement
         : 'rightSendForm';
@@ -589,8 +593,10 @@ function toolbarHtml() {
                 <button id="quicker_api_toggle" class="quicker-api__toggle" type="button" aria-expanded="true" aria-controls="quicker_api_body" title="收起 Quicker Api">
                     <span class="quicker-api__brand"><i class="fa-solid fa-bolt"></i> Quicker Api</span>
                     <span id="quicker_api_summary" class="quicker-api__summary"></span>
+                    <span class="quicker-api__native-hint">已切回原生界面</span>
                     <i class="fa-solid fa-chevron-up quicker-api__chevron" aria-hidden="true"></i>
                 </button>
+                <button id="quicker_api_mode" class="menu_button quicker-api__mode-switch" type="button" role="switch" aria-checked="true" title="关闭后切回 SillyTavern 原生界面"><i class="fa-solid fa-toggle-on" aria-hidden="true"></i><span>插件界面</span></button>
             </div>
             <div id="quicker_api_body">
             <div class="quicker-api__field quicker-api__profile-field">
@@ -716,7 +722,7 @@ function renderPanelSummary() {
 }
 
 function togglePanel() {
-    if (extensionDisabled || teardownPending) return;
+    if (extensionDisabled || teardownPending || settings().nativeUi) return;
     panelCollapsed = !panelCollapsed;
     if (panelCollapsed && quickUrlMenu) closeQuickUrlMenu();
     renderPanelCollapseState();
@@ -776,6 +782,23 @@ function syncEditorModelToNative() {
         }
         input.val(model).trigger(isCustomFormat(format) ? 'input' : 'change');
     });
+    recordPresetModel(selectedProfile(), model);
+}
+
+// A model switched while the current preset is bound to the live Profile is
+// that preset's model from now on. Unbound presets and other Profiles (e.g. a
+// new channel applied without being bound) never overwrite a binding's model.
+function recordPresetModel(profile, model) {
+    if (!profile || profile.draft || settings().nativeUi || settings().activeProfileId !== profile.id) return;
+    if (presetTransitionBlocked || presetSwitchActive || !model || platform.isModelAction(model)) return;
+    if (!profileMatchesNative(profile, { includeModel: false })) return;
+    const presetName = currentPresetName();
+    if (!presetName || settings().presetBindings[presetName] !== profile.id) return;
+    editorModelBaseline = model;
+    const snapshot = settings().presetModels[presetName];
+    if (snapshot?.profileId === profile.id && snapshot.format === profile.format && snapshot.model === model) return;
+    settings().presetModels[presetName] = presetModelSnapshot(profile, model);
+    scheduleSettingsSave();
 }
 
 // Native model events fired synchronously by our own writes are not external
@@ -814,6 +837,7 @@ function reconcileNativeModel() {
     const model = nativeModelFor(format);
     if (platform.isModelAction(model) || model === getEditorModel(format)) return;
     renderModelControl(profile, model);
+    recordPresetModel(profile, model);
     renderStatus();
 }
 
@@ -1373,6 +1397,33 @@ function profileMatchesNative(profile, { includeModel = true } = {}) {
 
 function getBlockedSecretMessage(key) {
     return String(settings().blockedSecretKeys[key] || '');
+}
+
+// The host's key manager is where a key is picked for the live connection.
+// While that connection is this applied Profile, the picked key IS the
+// Profile's key; otherwise saving or reloading would re-activate the old one.
+function adoptNativeActiveSecret(profile) {
+    if (!profile || profile.draft || settings().activeProfileId !== profile.id) return false;
+    if (usesProxyProfile(profile.format, profile.endpoint) || !profileMatchesNative(profile, { includeModel: false })) return false;
+    const key = FORMATS[profile.format].secretKey;
+    if (getBlockedSecretMessage(key)) return false;
+    const active = getActiveSecret(key);
+    if (!active || active.id === profile.secretId || active.id === settings().emptySecretIds[key]) return false;
+    profile.secretId = active.id;
+    profile.needsSecret = false;
+    profile.updatedAt = new Date().toISOString();
+    scheduleSettingsSave();
+    return true;
+}
+
+function handleNativeSecretChange(key) {
+    // Plugin-owned rotations/writes run inside operations or preset transitions.
+    if (extensionDisabled || teardownPending || pendingOperations || presetTransitionBlocked || settings().nativeUi) return;
+    const profile = selectedProfile();
+    if (profile && FORMATS[profile.format].secretKey === key && adoptNativeActiveSecret(profile)) {
+        updateCredentialEditor(profile);
+    }
+    renderStatus();
 }
 
 function editorHasUnsavedChanges(profile) {
@@ -2336,6 +2387,7 @@ async function saveSelectedProfile() {
         return;
     }
     const keyValue = keyEditorDirty ? normalizeText($('#quicker_api_key_input').val()) : '';
+    if (!keyValue && !isNew) adoptNativeActiveSecret(current);
     let captureBase = current;
     if (keyValue) {
         const credentialDraft = normalizeProfile({ ...structuredClone(current), format });
@@ -2374,7 +2426,9 @@ async function saveSelectedProfile() {
         console.error('[QuickerApi] Saved Profile application failed:', error);
     }
     const presetName = currentPresetName();
-    if (applied && presetName) {
+    // A new channel is only applied; the current preset keeps its binding and
+    // model until this channel is saved again or a native preset is saved.
+    if (applied && presetName && !isNew) {
         settings().presetBindings[presetName] = current.id;
         settings().presetModels[presetName] = presetModelSnapshot(current, current.model);
     }
@@ -3849,7 +3903,7 @@ function scheduleQuickActionEntries() {
 }
 
 function handleNativePresetChangeBefore({ presetName, preset } = {}) {
-    if (extensionDisabled) return;
+    if (extensionDisabled || settings().nativeUi) return;
     beginPresetSwitch(preset);
     platform.rememberParameterEditors();
     const generation = ++profileSelectionGeneration;
@@ -3878,7 +3932,7 @@ async function handleNativePresetChange() {
 }
 
 async function applyNativePresetChange() {
-    if (extensionDisabled) return false;
+    if (extensionDisabled || settings().nativeUi) return false;
     platform.syncParameterEditors();
     beginPresetTransition();
     const generation = ++profileSelectionGeneration;
@@ -4094,7 +4148,7 @@ function installPresetSaveObserver() {
 
 function captureNativePresetSave(event, type) {
     clearNativePresetSaveIntent();
-    if (extensionDisabled || teardownPending) return;
+    if (extensionDisabled || teardownPending || settings().nativeUi) return;
     if (!SUPPORTED_SOURCES.has(oai_settings.chat_completion_source)) return;
     const profile = selectedProfile();
     const stop = message => {
@@ -4147,6 +4201,7 @@ function bindEvents() {
     installPresetSaveObserver();
     bindNativePresetSaveCapture();
     $('#quicker_api_toggle').on('click', togglePanel);
+    $('#quicker_api_mode').on('click', () => void setNativeUi(!settings().nativeUi));
     window.addEventListener('pagehide', flushPanelState);
     window.addEventListener('beforeunload', warnBeforeLeaving);
     $('#quicker_api_profile_select').on('change', function () {
@@ -4157,7 +4212,14 @@ function bindEvents() {
         if (!profile) return renderStatus();
         $('#quicker_api_format').val(profile.format);
         if (profile.draft) return renderProfiles(profile.id);
-        void applyProfileById(profile.id, quickActionTransaction, { applyModel: true, manageTransition: true });
+        // The current preset's binding remembers the model last used with it.
+        const presetName = currentPresetName();
+        const bound = Boolean(presetName) && settings().presetBindings[presetName] === profile.id;
+        void applyProfileById(profile.id, quickActionTransaction, { applyModel: !bound, manageTransition: true }).then(applied => {
+            if (applied && bound && settings().activeProfileId === profile.id && currentPresetName() === presetName) {
+                restoreBoundPresetModel(presetName, profile);
+            }
+        });
     });
     $('#quicker_api_format').on('change', function () {
         clearKeyEditor();
@@ -4188,6 +4250,8 @@ function bindEvents() {
     eventSource.on(event_types.PRESET_DELETED, handlePresetDeleted);
     eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, guardGenerationWhenBlocked);
     eventSource.makeLast(event_types.CHAT_COMPLETION_SETTINGS_READY, guardGenerationWhenBlocked);
+    eventSource.on(event_types.SECRET_ROTATED, handleNativeSecretChange);
+    eventSource.on(event_types.SECRET_WRITTEN, handleNativeSecretChange);
     $('#quicker_api_url').on('input', function () {
         const format = normalizeFormat($('#quicker_api_format').val());
         const proxyMode = usesProxyProfile(format, normalizeText($(this).val()));
@@ -4251,15 +4315,45 @@ function configureAdditionalParametersPopup() {
         .insertBefore($(excludeInput).closest('.flex1.flex-container.flexFlowColumn'));
 }
 
+// Native editors the panel replaces while it manages the current source. The
+// reverse-proxy drawer is where Claude/Gemini endpoints live natively; the
+// panel owns those endpoints (and their bound proxy presets) itself.
+function nativeProviderEditors() {
+    return $('#custom_form, #claude_form, #makersuite_form').add($('#openai_proxy_preset').closest('.inline-drawer'));
+}
+
 function updatePanelVisibility() {
     const supported = SUPPORTED_SOURCES.has(String($('#chat_completion_source').val()));
     $('#quicker_api').toggle(supported);
     updateAdditionalParametersButton();
-    if (supported) {
-        $('#custom_form, #claude_form, #makersuite_form').addClass('quicker-api__native-provider');
-    } else {
-        $('#custom_form, #claude_form, #makersuite_form').removeClass('quicker-api__native-provider');
-    }
+    nativeProviderEditors().toggleClass('quicker-api__native-provider', supported && !settings().nativeUi);
+    renderPanelMode();
+}
+
+function renderPanelMode() {
+    const nativeUi = settings().nativeUi;
+    $('#quicker_api').toggleClass('is-native-ui', nativeUi);
+    $('#quicker_api_mode')
+        .attr('aria-checked', String(!nativeUi))
+        .attr('title', nativeUi ? '开启后切回 Quicker Api 界面' : '关闭后切回 SillyTavern 原生界面')
+        .find('i').attr('class', `fa-solid ${nativeUi ? 'fa-toggle-off' : 'fa-toggle-on'}`);
+}
+
+// Native UI hands the connection to the host's own controls. Switching back
+// takes it over again exactly like a page load does.
+async function setNativeUi(nativeUi) {
+    if (extensionDisabled || teardownPending || pendingOperations || presetTransitionBlocked) return;
+    if (settings().nativeUi === nativeUi) return;
+    closeModelPicker();
+    closeQuickUrlMenu();
+    settings().nativeUi = nativeUi;
+    scheduleSettingsSave();
+    updatePanelVisibility();
+    if (nativeUi) return;
+    await enqueueOperation(async () => {
+        if (!await readAuthoritativeSecretState()) toastr.warning('Quicker Api 暂时无法读取权威密钥状态；切换将保持阻断。');
+        await restoreInitialProfileSelection();
+    });
 }
 
 async function restoreInitialProfileSelection() {
@@ -4270,6 +4364,8 @@ async function restoreInitialProfileSelection() {
     if (!target) target = profiles().find(profile => profile.id === settings().activeProfileId) || null;
     if (!target) target = profiles().find(profile => !profile.draft && profileMatchesNative(profile)) || null;
     if (!target && profiles().length === 1) target = profiles()[0];
+    // A key picked in the host's key manager for this live connection is kept.
+    adoptNativeActiveSecret(target);
     settings().selectedProfileId = target?.id || null;
     settings().activeProfileId = null;
     scheduleSettingsSave();
@@ -4279,8 +4375,12 @@ async function restoreInitialProfileSelection() {
     beginPresetTransition();
     try {
         const isBound = target.id === boundId;
-        const applied = await applyProfile(target, generation, true, !isBound);
-        if (applied && isBound) restoreBoundPresetModel(currentPreset, target);
+        // The host already restored the last model the user ran with. When its
+        // live connection is this Profile, that model wins over any default or
+        // preset snapshot; those only seed a connection that must be switched.
+        const keepLiveModel = profileMatchesNative(target, { includeModel: false }) && Boolean(nativeModelFor(target.format));
+        const applied = await applyProfile(target, generation, true, !isBound && !keepLiveModel);
+        if (applied && isBound && !keepLiveModel) restoreBoundPresetModel(currentPreset, target);
         if (!applied) renderStatus('所选 Profile 未应用。');
     } finally {
         endPresetTransition();
@@ -4328,7 +4428,7 @@ async function teardownQuickerApi() {
     $('#quicker_api').remove();
     unbindModelPickerPosition();
     $('#quicker_api_model_portal').remove();
-    $('#custom_form, #claude_form, #makersuite_form').removeClass('quicker-api__native-provider');
+    nativeProviderEditors().removeClass('quicker-api__native-provider');
     $(document).off('.quickerApi').off('.quickerApiMenu');
     $(window).off('.quickerApiMenu');
     $(globalThis.visualViewport).off('.quickerApiMenu');
@@ -4339,6 +4439,8 @@ async function teardownQuickerApi() {
     eventSource.removeListener(event_types.PRESET_RENAMED, handlePresetRenamed);
     eventSource.removeListener(event_types.PRESET_DELETED, handlePresetDeleted);
     eventSource.removeListener(event_types.CHAT_COMPLETION_SETTINGS_READY, guardGenerationWhenBlocked);
+    eventSource.removeListener(event_types.SECRET_ROTATED, handleNativeSecretChange);
+    eventSource.removeListener(event_types.SECRET_WRITTEN, handleNativeSecretChange);
     const updateButton = document.getElementById('update_oai_preset');
     const createButton = document.getElementById('new_oai_preset');
     if (nativePresetCaptureHandlers.update) updateButton?.removeEventListener('click', nativePresetCaptureHandlers.update, true);
@@ -4415,7 +4517,8 @@ jQuery(() => {
     watchForDomChanges();
     void enqueueOperation(async () => {
         if (!await readAuthoritativeSecretState()) toastr.warning('Quicker Api 暂时无法读取权威密钥状态；切换将保持阻断。');
-        await restoreInitialProfileSelection();
+        if (!settings().nativeUi) await restoreInitialProfileSelection();
+        else renderStatus();
     });
     console.log('[QuickerApi] Extension loaded');
 });

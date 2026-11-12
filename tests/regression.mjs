@@ -196,9 +196,12 @@ try {
 
     state.failPreset = true;
     await run(`$('#quicker_api_custom_model').val('model-a'); document.getElementById('update_oai_preset').click(); nativeSaveTask`);
-    assert.equal(await run('settings().presetModels.A.model'), 'model-c');
+    // The failed file write keeps the native preset; the binding still follows
+    // the model now live on its own Profile.
+    assert.equal(state.presets.A.custom_model, 'model-c');
+    assert.deepEqual(await run('[settings().presetBindings.A === profiles()[0].id, settings().presetModels.A.model]'), [true, 'model-a']);
     state.failPreset = false;
-    log('failed native save does not overwrite the successful binding');
+    log('failed native save does not overwrite the native preset');
 
     await run(`$('#quicker_api_url').val('https://different.invalid/v1'); document.getElementById('update_oai_preset').click()`);
     assert.equal(await run('nativePresetSaveIntent'), null);
@@ -242,6 +245,63 @@ try {
     await run('enqueueOperation(restoreInitialProfileSelection)');
     assert.equal(await run('getEditorModel()'), 'model-c');
     log('startup restoration does not replace the bound model with Profile default');
+
+    // The host persists the model last used (e.g. one added after the preset
+    // was saved); a model switched on the bound Profile is recorded for the
+    // preset, so startup and later preset switches return to it.
+    await run(`$('#custom_model_id').val('model-added').trigger('input'); new Promise(resolve => setTimeout(resolve, 50))`);
+    assert.equal(await run('settings().presetModels.A.model'), 'model-added');
+    await run('enqueueOperation(restoreInitialProfileSelection)');
+    assert.deepEqual(await run('[getEditorModel(), oai_settings.custom_model, settings().presetModels.A.model, settings().activeProfileId]'),
+        ['model-added', 'model-added', 'model-added', profile.id]);
+    // A live connection that is not this Profile is seeded from the record.
+    await run(`$('#custom_api_url_text').val('https://elsewhere.invalid/v1').trigger('input'); enqueueOperation(restoreInitialProfileSelection)`);
+    assert.deepEqual(await run('[getEditorModel(), oai_settings.custom_model, oai_settings.custom_url]'), ['model-added', 'model-added', profile.endpoint]);
+    await run(`$('#quicker_api_custom_model').val('model-c').trigger('change')`);
+    assert.deepEqual(await run('[settings().presetModels.A.model, settings().presetModels.B.model, profiles()[0].model, $("#quicker_api_status").text()]'),
+        ['model-c', 'model-b', 'profile-default', '已保存并安全应用。']);
+    await run(`switchTestPreset('B')`);
+    await run(`switchTestPreset('A')`);
+    assert.equal(await run('getEditorModel()'), 'model-c');
+    // Picking the bound Profile again uses the preset's model, not its default.
+    await run(`$('#quicker_api_profile_select').val(profiles()[0].id).trigger('change'); new Promise(resolve => setTimeout(resolve, 50)).then(() => operationQueue)`);
+    assert.deepEqual(await run('[getEditorModel(), oai_settings.custom_model]'), ['model-c', 'model-c']);
+    log('a model switched on the bound Profile is recorded for the preset and restored by startup, preset and Profile switches');
+
+    // A key picked in the host key manager for the applied Profile becomes its
+    // key; saving or reloading must not re-activate the previous one.
+    state.secrets = { api_key_custom: [{ id: 'test-secret', active: true }, { id: 'picked-secret', active: false }], api_key_claude: [{ id: 'test-secret', active: true }], api_key_makersuite: [{ id: 'test-secret', active: true }] };
+    const pickNativeKey = id => run(`(async () => {
+        await fetch('/api/secrets/rotate', { method:'POST', headers:getRequestHeaders(), body:JSON.stringify({ key:'api_key_custom', id:${JSON.stringify(id)} }) });
+        await readAuthoritativeSecretState();
+        await eventSource.emit(event_types.SECRET_ROTATED, 'api_key_custom');
+    })()`);
+    await run('readAuthoritativeSecretState()');
+    await pickNativeKey('picked-secret');
+    assert.deepEqual(await run('[profiles()[0].secretId, $("#quicker_api_status").text()]'), ['picked-secret', '已保存并安全应用。']);
+    await run('enqueueOperation(saveSelectedProfile)');
+    assert.deepEqual(await run('[profiles()[0].secretId, getActiveSecret(SECRET_KEYS.CUSTOM)?.id]'), ['picked-secret', 'picked-secret']);
+    await run('enqueueOperation(restoreInitialProfileSelection)');
+    assert.equal(await run('getActiveSecret(SECRET_KEYS.CUSTOM)?.id'), 'picked-secret');
+    // A Profile that is not the applied live connection never adopts keys.
+    await run('settings().activeProfileId = null');
+    await pickNativeKey('test-secret');
+    assert.equal(await run('profiles()[0].secretId'), 'picked-secret');
+    await run('applyProfileById(profiles()[0].id, quickActionTransaction, { applyModel: false })');
+    await pickNativeKey('test-secret');
+    assert.equal(await run('profiles()[0].secretId'), 'test-secret');
+    delete state.secrets;
+    await run('readAuthoritativeSecretState()');
+    log('a key picked natively for the applied Profile is kept by save and startup; inactive Profiles ignore it');
+
+    await run(`$('#chat_completion_source').append($('<option>').val('openai').text('OpenAI'));
+        $('#openai_api').append('<div class="inline-drawer" id="fixture_proxy_drawer" data-source="openai,claude,makersuite"><select id="openai_proxy_preset"></select></div>')`);
+    const proxyDrawerHidden = source => run(`$('#chat_completion_source').val(${JSON.stringify(source)}).trigger('change'); getComputedStyle(document.getElementById('fixture_proxy_drawer')).display === 'none'`);
+    assert.deepEqual([await proxyDrawerHidden('claude'), await proxyDrawerHidden('makersuite'), await proxyDrawerHidden('openai')], [true, true, false]);
+    await run(`$('#chat_completion_source').val('custom').trigger('change'); $('#fixture_proxy_drawer').remove(); $('#chat_completion_source option[value="openai"]').remove();
+        applyProfileById(profiles()[0].id, quickActionTransaction, { applyModel: false })`);
+    assert.deepEqual(await run('[oai_settings.chat_completion_source, getEditorModel()]'), ['custom', 'model-c']);
+    log('the native reverse-proxy drawer is hidden while the panel manages Claude/Gemini and shown for other sources');
     await run(`profiles()[0].name += ' renamed'; renderProfiles(profiles()[0].id)`);
     assert.equal(await run('getEditorModel()'), 'model-c');
     await run(`profiles()[0].name = ${JSON.stringify(profile.name)}; renderProfiles(profiles()[0].id)`);

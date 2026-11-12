@@ -38,7 +38,10 @@ export async function runPresetRegressions({ page, state, log }) {
         assert.deepEqual(await run(`[settings().presetBindings[${JSON.stringify(name)}], settings().presetModels[${JSON.stringify(name)}]?.model, importProfile.model]`),
             ['import-profile', 'chosen-model', 'profile-default']);
         await run(`renderModelControl(importProfile, 'previous-model'); syncEditorModelToNative(); switchTestPreset(${JSON.stringify(name)})`);
-        assert.deepEqual(await run(`[oai_settings.custom_model, getEditorModel()]`), ['chosen-model', 'chosen-model']);
+        // Once bound, a model switched on the Profile is that preset's model.
+        assert.deepEqual(await run(`[oai_settings.custom_model, getEditorModel(), settings().presetModels[${JSON.stringify(name)}]?.model]`),
+            ['previous-model', 'previous-model', 'previous-model']);
+        await run(`renderModelControl(importProfile, 'chosen-model'); syncEditorModelToNative()`);
         log(`native update binds an imported preset without requiring API save (native bind=${bind})`);
     }
     // An import that changes the connection must never inherit verified API state.

@@ -16,6 +16,7 @@ export async function runV310Regressions({ page, log, setViewport }) {
         applyProfileById('v310-a');
     `);
     assert.equal(await run(`settings().activeProfileId`), 'v310-a');
+    const presetRecordBefore = await run(`JSON.stringify([currentPresetName(), settings().presetBindings[currentPresetName()], settings().presetModels[currentPresetName()]])`);
 
     // 1. New channel: name first, then an empty draft that inherits nothing.
     await run(`window.v310Prompt = promptName; promptName = async () => 'Channel B'; createProfile()`);
@@ -43,6 +44,18 @@ export async function runV310Regressions({ page, log, setViewport }) {
     assert.equal(saved.needsSecret, true);
     assert.deepEqual([saved.active, saved.native], [true, 'typed-b']);
     log('saving the draft keeps its name, favorites only its own model and never borrows the old channel key');
+
+    // A new channel is applied but never takes over the current preset: its
+    // first save and its model switches leave the binding and model alone.
+    const presetRecord = `JSON.stringify([currentPresetName(), settings().presetBindings[currentPresetName()], settings().presetModels[currentPresetName()]])`;
+    assert.equal(await run(presetRecord), presetRecordBefore);
+    await run(`$('#quicker_api_custom_model').append(new Option('typed-b2','typed-b2')).val('typed-b2').trigger('change')`);
+    assert.deepEqual([await run(presetRecord), await run('oai_settings.custom_model')], [presetRecordBefore, 'typed-b2']);
+    await run('enqueueOperation(saveSelectedProfile)');
+    const rebound = await run(`[settings().presetBindings[currentPresetName()] === selectedProfile().id, settings().presetModels[currentPresetName()].model]`);
+    assert.deepEqual(rebound, [true, 'typed-b2'], 'saving the channel again binds it explicitly');
+    await run(`(() => { const [name, id, snapshot] = JSON.parse(${JSON.stringify(presetRecordBefore)}); settings().presetBindings[name] = id; settings().presetModels[name] = snapshot; })()`);
+    log('a new channel first save does not rebind the preset; saving it again does');
 
     await run(`promptName = async () => null; createProfile()`);
     assert.equal(await run('profiles().length'), 2, 'cancelling the name prompt creates nothing');
@@ -202,4 +215,20 @@ export async function runV310Regressions({ page, log, setViewport }) {
     })()`);
     assert.deepEqual(proxyField.slice(1), ['proxy-secret-1', 'proxy-secret-1', 'restored-2', 'restored-2'], `proxy password field ${proxyField[0]} stays in sync`);
     log(`the proxy password reaches the host's own input (#${proxyField[0]}) when applied and restored`);
+
+    // The title switch hands the connection to the host's own UI and back.
+    await run(`if (!$('#custom_form').length) $('#openai_api').append('<div id="custom_form" data-fixture="native-ui"></div>'); settings().selectedProfileId='v310-a'; renderProfiles('v310-a'); applyProfileById('v310-a')`);
+    const toggleMode = () => run(`$('#quicker_api_mode').trigger('click'); new Promise(r => setTimeout(r, 20)).then(() => operationQueue)`);
+    await toggleMode();
+    const nativeMode = await run(`(() => ({
+        nativeUi: settings().nativeUi, panel: $('#quicker_api').hasClass('is-native-ui'), checked: $('#quicker_api_mode').attr('aria-checked'),
+        body: getComputedStyle(document.getElementById('quicker_api_body')).display, provider: $('#custom_form').hasClass('quicker-api__native-provider') }))()`);
+    assert.deepEqual(nativeMode, { nativeUi: true, panel: true, checked: 'false', body: 'none', provider: false });
+    await run(`togglePanel(); $('#custom_api_url_text').val('https://native.invalid/v1').trigger('input'); oai_settings.bind_preset_to_connection = false; switchTestPreset(currentPresetName() === 'A' ? 'B' : 'A')`);
+    assert.deepEqual(await run(`[oai_settings.custom_url, panelCollapsed]`), ['https://native.invalid/v1', false], 'native mode neither re-applies bound Profiles nor folds the panel');
+    await toggleMode();
+    assert.deepEqual(await run(`[settings().nativeUi, $('#quicker_api').hasClass('is-native-ui'), $('#custom_form').hasClass('quicker-api__native-provider'), oai_settings.custom_url, settings().activeProfileId]`),
+        [false, false, true, 'https://a.invalid/v1', 'v310-a']);
+    await run(`$('#custom_form[data-fixture="native-ui"]').remove()`);
+    log('the title switch shows the native UI without managing the connection, and switching back re-applies the bound Profile');
 }
