@@ -87,6 +87,7 @@ class Popup {
         return new Promise(resolve => { this.resolve = resolve; });
     }
     async complete(result) {
+        this.result = result;
         if (this.options.onClosing && !await this.options.onClosing(this)) return;
         this.dlg.close();
         this.dlg.remove();
@@ -166,11 +167,17 @@ $('#chat_completion_source').val(oai_settings.chat_completion_source);
 for (const [name, i] of Object.entries(openai_setting_names)) $('#settings_preset_openai').append($('<option>').val(i).text(name));
 $('#settings_preset_openai').val(openai_setting_names[oai_settings.preset_settings_openai]);
 
+// The connection subset of the hosts' settingsToUpdate (isConnection = true).
+const fixtureSettingsToUpdate = Object.fromEntries(['chat_completion_source', 'custom_api_format', 'custom_url', 'custom_model',
+    'custom_include_body', 'custom_exclude_body', 'custom_include_headers', 'additional_parameters_by_source',
+    'reverse_proxy', 'proxy_password', 'claude_model', 'google_model', 'opencode_model', 'opencode_endpoint', 'opencode_api_format',
+].map(key => [key, ['', key, false, true]]));
+
 async function switchTestPreset(name) {
     const preset = structuredClone(openai_settings[openai_setting_names[name]]);
     oai_settings.preset_settings_openai = name;
     $('#settings_preset_openai').val(openai_setting_names[name]);
-    await eventSource.emit(event_types.OAI_PRESET_CHANGED_BEFORE, { presetName: name, preset });
+    await eventSource.emit(event_types.OAI_PRESET_CHANGED_BEFORE, { presetName: name, preset, settingsToUpdate: fixtureSettingsToUpdate });
     if (oai_settings.bind_preset_to_connection) {
         Object.assign(oai_settings, preset, { preset_settings_openai: name });
         $('#chat_completion_source').val(oai_settings.chat_completion_source).trigger('change');

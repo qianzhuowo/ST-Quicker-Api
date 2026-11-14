@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-// Exercise the real model-manager DOM/draft and fetching path on both host adapters.
+// Exercise the real channel-manager catalog DOM/draft and fetching path on both host adapters.
 export async function runModelSearchRegressions({ page, state, log, setViewport }) {
     const run = page.evaluate;
     const initialRemote = ['GPT-4o', 'gpt-4.1-mini', 'Claude-3.5-Sonnet', 'claude-haiku', 'Gemini-2.5-Pro', 'special[Model]'];
@@ -27,13 +27,13 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
         window.searchRead=()=>({
             rows:$('.quicker-api__remote-model:not([hidden])').toArray().map(row=>({model:$(row).find('span').text(),checked:$(row).find('input').prop('checked')})),
             chosen:$('.quicker-api__chosen-model input').toArray().map(input=>input.value),
-            count:$('.quicker-api__model-search-count').text(),empty:$('.quicker-api__model-list').first().find('.quicker-api__empty-state').text(),
+            count:$('.quicker-api__model-search-count').text(),empty:$('.quicker-api__manager-panel[data-page="remote"] .quicker-api__model-list').find('.quicker-api__empty-state').text(),
             query:$('.quicker-api__model-search input').val(),open:Boolean(document.querySelector('dialog[open]'))
         });
-        window.searchTask=manageCustomModels(); true;
+        window.searchTask=manageChannels('search-profile'); $('.quicker-api__manager-pages [data-page="remote"]').trigger('click'); true;
     `);
     const search = query => run(`$('.quicker-api__model-search input').val(${JSON.stringify(query)}).trigger('input'); searchRead()`);
-    const action = name => run(`$('.quicker-api__manager-panel').first().find('[data-action="${name}"]').trigger('click'); searchRead()`);
+    const action = name => run(`$('.quicker-api__manager-panel[data-page="remote"]').find('[data-action="${name}"]').trigger('click'); searchRead()`);
     const toggle = model => run(`$('.quicker-api__remote-model:not([hidden])').filter((_,row)=>$(row).find('span').text()===${JSON.stringify(model)}).trigger('click'); searchRead()`);
     const names = result => result.rows.map(row => row.model);
     const checked = result => result.rows.filter(row => row.checked).map(row => row.model);
@@ -95,16 +95,16 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
     assert.deepEqual(await run('[getEditorModel(),oai_settings.claude_model]'), ['GPT-4o', 'GPT-4o']);
     log('without search bulk actions retain their original scope, and cancelling all model/search edits fully rolls back');
 
-    await run('window.searchTask=manageCustomModels(); true');
+    await run(`window.searchTask=manageChannels('search-profile'); $('.quicker-api__manager-pages [data-page="remote"]').trigger('click'); true`);
     assert.equal((await run('searchRead()')).query, '');
     await search('gem');
     await run(`window.searchFetchReached=false; window.searchFetchGate=new Promise(resolve=>window.searchReleaseFetch=resolve);
-        $('.quicker-api__manager-panel').first().find('[data-action="fetch"]').trigger('click');`);
+        $('.quicker-api__manager-panel[data-page="remote"]').find('[data-action="fetch"]').trigger('click');`);
     for (let i = 0; i < 100 && !await run('window.searchFetchReached'); i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(await run('window.searchFetchReached'), true);
     await search('nwm'); // Change the filter while the real host-model request is pending.
     await run('searchReleaseFetch()');
-    for (let i = 0; i < 100 && await run(`$('.quicker-api__manager-panel').first().find('[data-action="fetch"]').prop('disabled')`); i++) await new Promise(resolve => setTimeout(resolve, 20));
+    for (let i = 0; i < 100 && await run(`$('.quicker-api__manager-panel[data-page="remote"]').find('[data-action="fetch"]').prop('disabled')`); i++) await new Promise(resolve => setTimeout(resolve, 20));
     const refreshed = await run('searchRead()');
     assert.deepEqual(names(refreshed), ['New-Wide-Model']);
     assert.equal(refreshed.query, 'nwm'); assert.equal(refreshed.count, '显示 1 / 4 个模型');
@@ -130,10 +130,10 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
     await run('[...ownedPopups][0].completeCancelled(); searchTask');
     assert.equal(await run('JSON.stringify(searchProfile)===searchOriginalProfile'), true);
     log('cancelling after a remote fetch also discards the refreshed snapshot and draft selections');
-    await run('window.searchTask=manageCustomModels(); true');
+    await run(`window.searchTask=manageChannels('search-profile'); $('.quicker-api__manager-pages [data-page="remote"]').trigger('click'); true`);
     await search('nwm');
-    await run(`$('.quicker-api__manager-panel').first().find('[data-action="fetch"]').trigger('click');`);
-    for (let i = 0; i < 100 && await run(`$('.quicker-api__manager-panel').first().find('[data-action="fetch"]').prop('disabled')`); i++) await new Promise(resolve => setTimeout(resolve, 20));
+    await run(`$('.quicker-api__manager-panel[data-page="remote"]').find('[data-action="fetch"]').trigger('click');`);
+    for (let i = 0; i < 100 && await run(`$('.quicker-api__manager-panel[data-page="remote"]').find('[data-action="fetch"]').prop('disabled')`); i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.deepEqual(names(await run('searchRead()')), ['New-Wide-Model']);
     await toggle('New-Wide-Model');
     await run('[...ownedPopups][0].completeAffirmative(); searchTask');
@@ -147,7 +147,7 @@ export async function runModelSearchRegressions({ page, state, log, setViewport 
     await page.reload();
     assert.ok(await run(`profiles().find(p=>p.id==='search-profile').availableModels.includes('New-Wide-Model')`));
     assert.deepEqual(await run(`profiles().find(p=>p.id==='search-profile').fetchedModels`), refreshedRemote);
-    await run('window.searchTask=manageCustomModels(); true');
+    await run(`window.searchTask=manageChannels('search-profile'); $('.quicker-api__manager-pages [data-page="remote"]').trigger('click'); true`);
     assert.deepEqual(await run(`$('.quicker-api__remote-model:not([hidden]) span').toArray().map(span=>span.textContent)`), refreshedRemote);
     assert.equal(await run(`$('.quicker-api__model-search input').val()`), '');
     await run('[...ownedPopups][0].completeCancelled(); searchTask');

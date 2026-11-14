@@ -47,7 +47,7 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
             const format = ${JSON.stringify(format)};
             const p = normalizeProfile({id:'provider-test', format, model:'saved-model', availableModels:['added-model'], secretId:'bound'});
             $('#quicker_api_format').val(format); renderModelControl(p);
-            const controls = ['add_model','fetch_models','manage_models'].every(id => document.getElementById('quicker_api_'+id));
+            const controls = ['add_model','fetch_models','channels'].every(id => document.getElementById('quicker_api_'+id));
             const options = $('#quicker_api_custom_model option').toArray().map(o => o.value);
             compatRequests = [];
             const result = await fetchModelsForProfile(p, '');
@@ -80,8 +80,8 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
     await run(`renderProfiles(compatCustom.id); compatRequests=[]`);
     await run(`compatRequests=[]; $('#chat_completion_source').val('makersuite').trigger('change')`);
     assert.equal(await run(`compatRequests.some(r=>r.url.endsWith('/status') || r.url.endsWith('/rotate'))`), false);
-    assert.equal(await run(`$('#quicker_api_format').val()`), 'gemini');
-    log('native Google AI Studio selection only refreshes plugin UI; plugin adds no status request or credential rotation');
+    assert.deepEqual(await run(`[$('#quicker_api_format').val(), $('#quicker_api_url').val()]`), ['openai', 'https://models.invalid/v1']);
+    log('native Google AI Studio selection leaves the Profile editor alone; plugin adds no status request or credential rotation');
     await run(`renderProfiles(compatCustom.id); compatRequests=[]`);
     if (scopedHost) {
         for (const protocol of ['openai_responses', 'claude_messages', 'gemini_generate_content', 'gemini_interactions']) {
@@ -89,9 +89,10 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
                 const protocol = ${JSON.stringify(protocol)};
                 const p = normalizeProfile({id:'protocol-'+protocol, format:protocol, endpoint:'https://protocol.invalid/v1', model:'protocol-model', secretId:'bound', includeBody:'{"tag":"'+protocol+'"}', includeHeaders:'{"X-Protocol":"'+protocol+'"}'});
                 settings().profiles.push(p);
+                const editorBefore = $('#quicker_api_format').val();
                 $('#chat_completion_source').val('custom_'+protocol).trigger('change');
                 const panel = getComputedStyle(document.getElementById('quicker_api')).display !== 'none';
-                const selected = $('#quicker_api_format').val();
+                const selected = $('#quicker_api_format').val() === editorBefore;
                 const applied = await applyProfile(p);
                 const snapshot = snapshotNative();
                 const captured = captureNativeProfile('Captured', protocol, p);
@@ -105,7 +106,8 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
                     source:oai_settings.chat_completion_source, protocol:oai_settings.custom_api_format, selection:$('#chat_completion_source').val()};
             })()`);
             assert.equal(result.panel, true);
-            assert.equal(result.selected, protocol);
+            // A native source change never rewrites the selected Profile's editor.
+            assert.equal(result.selected, true);
             assert.equal(result.applied, true);
             assert.equal(result.captured, protocol);
             assert.equal(result.capturedBody, JSON.stringify({tag:protocol}));
@@ -246,7 +248,7 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
             $('#quicker_api_format').val('anthropic'); renderModelControl(compatClaude);
         `);
         assert.equal(await run(`$('#quicker_api_custom_model option[value="__manage_models__"]').length`), 0);
-        assert.equal(await run(`modelSuggestionsForProfile('compat-claude').includes('__manage_models__')`), false);
+        assert.equal(await run(`modelPickerData().all.includes('__manage_models__')`), false);
         assert.equal(await run(`collectNativeImportCandidates(compatSecrets).then(c=>c.find(p=>p.sourceRef==='connection-manager:unsupported-custom')?.format)`), 'openai_responses');
         log('TT filters model action entries and imports Connection Manager Custom with its exact protocol');
 

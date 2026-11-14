@@ -56,7 +56,7 @@ export async function runModelPickerRegressions({ page, log, setViewport }) {
             open:$('.quicker-api__model-picker').hasClass('is-open') && !$('#quicker_api_model_dropdown').prop('hidden'),
             view:$('[data-model-view].is-active').attr('data-model-view'),
             counts:$('[data-model-view] small').toArray().map(s=>s.textContent),
-            rows:$('.quicker-api__model-option').toArray().map(r=>({model:r.getAttribute('data-model'),add:r.getAttribute('data-add-model'),
+            rows:$('.quicker-api__model-option:not([data-profile-id])').toArray().map(r=>({model:r.getAttribute('data-model'),add:r.getAttribute('data-add-model'),
                 favorite:r.classList.contains('is-favorite'),stale:r.classList.contains('is-stale'),selected:r.classList.contains('is-selected'),
                 badge:$(r).find('.quicker-api__model-option-badges small').text()})),
             label:$('.quicker-api__model-trigger-label').text(), mark:$('.quicker-api__model-trigger-mark').attr('class'),
@@ -82,7 +82,7 @@ export async function runModelPickerRegressions({ page, log, setViewport }) {
     assert.equal(state.view, 'favorites');
     assert.deepEqual(models(state), ['fav-a', 'gone-model']);
     assert.deepEqual(state.rows.map(row => row.stale), [false, true]);
-    assert.deepEqual(state.counts, ['2', '3']);
+    assert.deepEqual(state.counts, ['2', '3', '2']);
     log('a fresh session opens on favorites, and favorites missing from the remote snapshot are flagged stale');
 
     state = await tab('all');
@@ -176,25 +176,22 @@ export async function runModelPickerRegressions({ page, log, setViewport }) {
     await open();
     state = await tab('favorites');
     assert.deepEqual(models(state), ['only']);
-    await tab('all');
-    await waitFor('pickerStatusCalls===1 && pendingOperations===0', 'auto fetch');
-    state = await read();
-    assert.deepEqual(models(state).slice(0, 3), ['only', 'fav-a', 'remote-b']);
-    await run(`emptyProfile.fetchedModels=[]; renderModelControl(emptyProfile)`);
-    await tab('favorites');
-    await tab('all');
-    await new Promise(resolve => setTimeout(resolve, 100));
-    assert.equal(await run('pickerStatusCalls'), 1, 'auto fetch runs at most once per profile/endpoint per session');
-    state = await read();
+    state = await tab('all');
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(await run('pickerStatusCalls'), 0, 'opening an empty full list never fetches by itself');
     assert.equal(models(state)[0], 'only');
     assert.ok(models(state).includes('claude-model'), 'without a snapshot the host built-in list is the fallback');
+    await run(`$('#quicker_api_model_dropdown [data-model-picker-action="fetch"]').trigger('click'); true`);
+    await waitFor('pickerStatusCalls===1 && pendingOperations===0', 'manual fetch');
+    state = await read();
+    assert.deepEqual(models(state).slice(0, 3), ['only', 'fav-a', 'remote-b']);
     await run('closeModelPicker()');
-    log('an empty full list auto-fetches once per session and otherwise offers a manual fetch');
+    log('the full list is only fetched when the user clicks fetch; before that the host built-in list is shown');
 
     // 4. Model manager stale indicator and one-click cleanup.
     await run(`settings().selectedProfileId=pickerProfile.id; settings().activeProfileId=pickerProfile.id; oai_settings.claude_model='fav-a'; renderProfiles(pickerProfile.id); true`);
     const before = await run('JSON.stringify(pickerProfile.availableModels)');
-    await run('window.managerTask=manageCustomModels(); true');
+    await run('window.managerTask=manageChannels(pickerProfile.id); true');
     const managerRead = () => run(`({
         badge:$('.quicker-api__stale-badge').text(), hidden:$('.quicker-api__stale-badge').prop('hidden'),
         stale:$('.quicker-api__chosen-model.is-stale input').toArray().map(i=>i.value),
@@ -213,53 +210,62 @@ export async function runModelPickerRegressions({ page, log, setViewport }) {
     assert.ok(!manager.chosen.includes('gone-model') && manager.chosen.includes('fav-a'));
     await run('[...ownedPopups][0].completeCancelled(); managerTask');
     assert.equal(await run('JSON.stringify(pickerProfile.availableModels)'), before, 'cancel rolls back the cleanup');
-    await run('window.managerTask=manageCustomModels(); true');
+    await run('window.managerTask=manageChannels(pickerProfile.id); true');
     await run(`$('[data-action="prune"]').trigger('click')`);
     await run('[...ownedPopups][0].completeAffirmative(); managerTask');
     assert.deepEqual(await run('pickerProfile.availableModels'), ['remote-b', 'fav-a']);
     assert.equal(await run(`$('#quicker_api_custom_model').val()`), 'fav-a');
     log('the manager flags stale favorites, cleans them in one click, and only saves on confirm');
 
-    // Phones: the manager is paged by two tabs instead of a scrolling column.
+    // Phones: the channel manager shows the list or one channel; the catalog pages favorites / remote models.
     await run(`pickerProfile.fetchedModels=Array.from({length:80},(_,i)=>'bulk-'+i); pickerProfile.fetchedFromEndpoint=pickerProfile.endpoint; true`);
     const pages = () => run(`(() => {
-        const m=document.querySelector('.quicker-api__model-manager--paged'); const vis=e=>!!e && e.getClientRects().length>0;
-        const panel=p=>m.querySelector('.quicker-api__manager-panel[data-page="'+p+'"]');
-        let scrolls=[]; for (let n=m; n && n!==document.documentElement; n=n.parentElement) { const s=getComputedStyle(n).overflowY; if (/auto|scroll/.test(s) && n.scrollHeight>n.clientHeight+1) scrolls.push(n.className||n.tagName); }
-        const list=m.querySelector('[data-page="'+m.dataset.page+'"].quicker-api__manager-panel .quicker-api__model-list');
-        // The host popup clips (overflow: hidden) rather than scrolls: nothing may overflow it either.
-        const clipped=[]; for (let n=m; n && n.tagName!=='DIALOG'; n=n.parentElement) if (n.scrollHeight>n.clientHeight+1) clipped.push(n.className||n.tagName);
-        const controls=m.closest('dialog').querySelector('.popup-controls').getBoundingClientRect();
-        return { tabs: vis(m.querySelector('.quicker-api__manager-pages')), page: m.dataset.page, remote: vis(panel('remote')), chosen: vis(panel('chosen')),
-            tabsFill: (()=>{ const bar=m.querySelector('.quicker-api__manager-pages'); const [a,b]=[...bar.children].map(x=>x.getBoundingClientRect()); const r=bar.getBoundingClientRect();
-                return Math.abs(a.left-r.left)<=1 && Math.abs(b.right-r.right)<=1 && Math.abs(a.width-b.width)<=1; })(),
-            labels: [...m.querySelectorAll('.quicker-api__manager-pages small')].map(s=>s.textContent), scrolls, clipped,
-            // The fixture popup has no buttons; reserve the real button row (about 2.5rem) within the host's 100dvh - 2em cap.
-            fits: m.closest('dialog').getBoundingClientRect().height + (controls.height ? 0 : 40) <= innerHeight - 32 + 1 && controls.bottom<=innerHeight+1, listScrolls: list.scrollHeight>list.clientHeight };
+        const root=document.querySelector('.quicker-api__channels'); const m=root.querySelector('.quicker-api__model-manager--paged'); const vis=e=>!!e && e.getClientRects().length>0;
+        const panel=p=>m?.querySelector('.quicker-api__manager-panel[data-page="'+p+'"]');
+        const controls=root.closest('dialog').querySelector('.popup-controls').getBoundingClientRect();
+        return { view: root.dataset.view, sidebar: vis(root.querySelector('.quicker-api__channels-sidebar')), detail: vis(root.querySelector('.quicker-api__channel-detail')),
+            tabs: vis(m?.querySelector('.quicker-api__manager-pages')), page: m?.dataset.page, remote: vis(panel('remote')), chosen: vis(panel('chosen')),
+            labels: m ? [...m.querySelectorAll('.quicker-api__manager-pages small')].map(s=>s.textContent) : [],
+            horizontal: root.scrollWidth<=root.clientWidth+1,
+            columns: (() => { const c=root.querySelector('[data-card="connection"]')?.getBoundingClientRect(), md=root.querySelector('[data-card="models"]')?.getBoundingClientRect(); return c && md ? (Math.abs(c.top-md.top)<=1 && md.left>=c.right-1 ? 'side' : 'stacked') : ''; })(),
+            detailScrolls: (() => { const d=root.querySelector('.quicker-api__channel-detail'); return d.scrollHeight>d.clientHeight+1; })(),
+            subtitle: root.querySelectorAll('.quicker-api__channel-subtitle').length, hint: vis(root.querySelector('[data-role="credential-hint"]')),
+            live: (() => { const t=root.querySelector('.quicker-api__channel-title'), b=t?.nextElementSibling; return b?.matches('.quicker-api__channel-badge.is-live') ? Math.round(b.getBoundingClientRect().left - t.getBoundingClientRect().right) : null; })(),
+            dialog: (() => { const r=root.closest('dialog').getBoundingClientRect(); return { width: Math.round(r.width), inside: r.top>=0 && r.bottom<=innerHeight+1 }; })(),
+            // The dialog has a fixed size inside the viewport; nothing in it may overflow (only lists scroll).
+            fits: (() => { const d=root.closest('dialog'); const r=d.getBoundingClientRect(); const c=d.querySelector('.popup-content'); return r.top>=0 && r.bottom<=innerHeight+1 && c.scrollHeight<=c.clientHeight+1 && controls.bottom<=innerHeight+1; })() };
     })()`);
     await setViewport(360, 640);
-    await run('window.managerTask=manageCustomModels(); true');
+    await run('window.managerTask=manageChannels(pickerProfile.id); true');
     let paged = await pages();
-    assert.deepEqual({ tabs: paged.tabs, page: paged.page, remote: paged.remote, chosen: paged.chosen }, { tabs: true, page: 'remote', remote: true, chosen: false });
-    assert.deepEqual(paged.scrolls, [], `nothing around the manager scrolls on phones: ${JSON.stringify(paged)}`);
-    assert.deepEqual(paged.clipped, [], `nothing in the manager is clipped by the popup: ${JSON.stringify(paged)}`);
-    assert.ok(paged.fits && paged.listScrolls, JSON.stringify(paged));
-    assert.ok(paged.tabsFill, 'the two page tabs split the full row evenly');
-    assert.equal(paged.labels[0], '80');
-    await run(`$('.quicker-api__manager-pages [data-page="chosen"]').trigger('click'); true`);
+    assert.deepEqual({ view: paged.view, sidebar: paged.sidebar, detail: paged.detail, tabs: paged.tabs, page: paged.page, remote: paged.remote, chosen: paged.chosen },
+        { view: 'detail', sidebar: false, detail: true, tabs: true, page: 'chosen', remote: false, chosen: true }, JSON.stringify(paged));
+    assert.ok(paged.fits && paged.horizontal, JSON.stringify(paged));
+    assert.equal(paged.labels[1], '80');
+    assert.match(paged.labels[0], /^\d+ · ⚠\d+$/, 'the favorites tab shows the count and stale count');
+    await run(`$('.quicker-api__manager-pages [data-page="remote"]').trigger('click'); true`);
     paged = await pages();
-    assert.deepEqual({ page: paged.page, remote: paged.remote, chosen: paged.chosen, scrolls: paged.scrolls, clipped: paged.clipped, fits: paged.fits }, { page: 'chosen', remote: false, chosen: true, scrolls: [], clipped: [], fits: true });
-    assert.match(paged.labels[1], /^\d+ · ⚠\d+$/, 'the favorites tab shows the count and stale count');
+    assert.deepEqual({ page: paged.page, remote: paged.remote, chosen: paged.chosen, fits: paged.fits }, { page: 'remote', remote: true, chosen: false, fits: true });
+    await run(`$('[data-channel-action="back"]').trigger('click'); true`);
+    paged = await pages();
+    assert.deepEqual({ view: paged.view, sidebar: paged.sidebar, detail: paged.detail }, { view: 'list', sidebar: true, detail: false });
+    await run(`$('.quicker-api__channel-item').first().trigger('click'); true`);
+    assert.equal((await pages()).view, 'detail');
     await setViewport(1280, 800);
     paged = await pages();
-    assert.deepEqual({ tabs: paged.tabs, remote: paged.remote, chosen: paged.chosen }, { tabs: false, remote: true, chosen: true }, 'desktop keeps both panels side by side');
+    assert.deepEqual({ sidebar: paged.sidebar, detail: paged.detail, tabs: paged.tabs }, { sidebar: true, detail: true, tabs: true }, 'desktop shows the channel list beside the channel');
+    assert.deepEqual({ columns: paged.columns, detailScrolls: paged.detailScrolls, subtitle: paged.subtitle, hint: paged.hint, inside: paged.dialog.inside }, { columns: 'side', detailScrolls: false, subtitle: 0, hint: false, inside: true }, JSON.stringify(paged));
+    assert.ok(paged.dialog.width >= 1200, `the desktop channel manager uses most of the window: ${paged.dialog.width}`);
+    assert.ok(paged.live !== null && paged.live >= 0 && paged.live <= 12, `the live badge follows the channel title: ${paged.live}`);
     await run('[...ownedPopups][0].completeCancelled(); managerTask');
-    log('on phones the manager pages remote models and favorites behind tabs and never needs page scrolling; desktop shows both');
+    log('on phones the channel manager shows the list or one channel and pages its catalog; desktop shows list and channel side by side');
 
     // 5. Layout of the open picker: a fixed overlay (never stretches the host
     // panel), flips above when there is no room below, 2 columns on phones / 3 on desktop.
     for (const [width, columns] of [[320, '2'], [768, '3'], [1280, '3']]) {
         await setViewport(width, 700);
+        // Host buttons animate their size across breakpoints; measure once they settle.
+        await new Promise(resolve => setTimeout(resolve, 500));
         const before = await run(`(() => { const out=[]; for (let n=document.getElementById('quicker_api_model_trigger'); n; n=n.parentElement) out.push(n.scrollHeight); return out; })()`);
         await open();
         const layout = await run(`(() => {

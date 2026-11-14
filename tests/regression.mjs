@@ -11,6 +11,7 @@ import { runPresetRegressions } from './preset-regression.mjs';
 import { runModelSearchRegressions } from './model-search-regression.mjs';
 import { runModelPickerRegressions } from './model-picker-regression.mjs';
 import { runV310Regressions } from './v310-regression.mjs';
+import { runProviderRegressions } from './provider-regression.mjs';
 
 // Run from the plugin: node tests/regression.mjs
 // Override CHROME_PATH and ST_PUBLIC_DIR when the host/browser is elsewhere.
@@ -33,7 +34,7 @@ const state = {
     settings: {
         extension_settings: { quickerApi: {
             schemaVersion: 12, migratedFromCustomOpenAIProfiles: true, profiles: [profile], selectedProfileId: profile.id, activeProfileId: profile.id,
-            presetBindings: { A: profile.id, B: profile.id }, quickActionPlacement: 'disabled', panelCollapsed: true,
+            presetLink: true, presetBindings: { A: profile.id, B: profile.id }, quickActionPlacement: 'disabled', panelCollapsed: true,
             quickActions: Array.from({ length: 8 }, (_, i) => ({ id: `qa-${i}`, name: '超长方案名称'.repeat(12), profileId: profile.id, model: 'model-a', sequence: i })),
             quickUrls: [{ id: 'url', name: 'Test', url: profile.endpoint }],
         } },
@@ -110,6 +111,13 @@ const server = createServer(async (req, res) => {
                     for (const entry of state.secrets[body.key]) entry.active = entry.id === body.id;
                 }
                 res.end('{}'); return;
+            case '/api/secrets/settings':
+                res.end(JSON.stringify({ allowKeysExposure: Boolean(state.secretValues) })); return;
+            case '/api/secrets/find': {
+                const value = state.secretValues?.[body.key]?.[body.id];
+                if (typeof value !== 'string') { res.writeHead(403).end('{}'); return; }
+                res.end(JSON.stringify({ value })); return;
+            }
             default: res.writeHead(404).end('{}');
         }
     } catch (error) { res.writeHead(500).end(JSON.stringify({ error: String(error) })); }
@@ -475,6 +483,7 @@ try {
         const v310Page = await newPage();
         await runV310Regressions({ page: v310Page, log, setViewport: (width, height, mobile = true) => cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }, v310Page.sessionId) });
     }
+    await runProviderRegressions({ page: await newPage(), state, log });
     assert.deepEqual(exceptions, [], `Unexpected browser exceptions: ${JSON.stringify(exceptions)}`);
     console.log(`\n${passed} regression checks passed (${host}). Host APIs and account data were simulated in memory.`);
 } finally {

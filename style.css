@@ -75,28 +75,6 @@
     flex: 0 0 auto;
 }
 
-.quicker-api__mode-switch {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 0.35rem;
-    margin: 0;
-    padding: 0.2rem 0.5rem;
-    font-size: 0.85em;
-    font-weight: 600;
-    white-space: nowrap;
-}
-
-.quicker-api__mode-switch i {
-    font-size: 1.35em;
-    color: var(--quicker-api-success);
-}
-
-.quicker-api.is-native-ui .quicker-api__mode-switch i {
-    color: inherit;
-    opacity: 0.65;
-}
-
 .quicker-api__native-hint,
 .quicker-api.is-native-ui #quicker_api_body,
 .quicker-api.is-native-ui .quicker-api__summary,
@@ -148,6 +126,108 @@
 
 .quicker-api__mobile-label {
     display: none !important;
+}
+
+/* "插件启用" / "联动预设": compact pill switches. The host styles every
+   checkbox (input[type='checkbox']), so the hidden input needs a selector that
+   outranks it, or it keeps taking space at the switch's left edge. */
+.quicker-api__switch {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.4rem;
+    width: auto;
+    margin: 0;
+    padding: 0.2rem 0.6rem 0.2rem 0.3rem;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 80%, transparent);
+    color: var(--SmartThemeBodyColor);
+    font-size: 0.85em;
+    font-weight: normal;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+}
+
+.quicker-api__switch:hover {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 60%, var(--SmartThemeBorderColor));
+}
+
+.quicker-api__switch > input[type='checkbox'].quicker-api__switch-input {
+    position: absolute;
+    inset: 0;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+    transform: none;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.quicker-api__switch-track {
+    position: relative;
+    flex: 0 0 auto;
+    width: 1.9rem;
+    height: 1.1rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 22%, transparent);
+    transition: background-color 0.18s ease;
+}
+
+.quicker-api__switch-thumb {
+    position: absolute;
+    top: 0.15rem;
+    left: 0.15rem;
+    width: 0.8rem;
+    height: 0.8rem;
+    border-radius: 50%;
+    background: var(--SmartThemeBodyColor);
+    box-shadow: 0 1px 3px #0006;
+    transition: transform 0.18s ease;
+}
+
+.quicker-api__switch-label {
+    opacity: 0.8;
+}
+
+.quicker-api__switch:has(.quicker-api__switch-input:checked) {
+    border-color: color-mix(in srgb, var(--quicker-api-success) 70%, var(--SmartThemeBorderColor));
+    background: color-mix(in srgb, var(--quicker-api-success) 14%, var(--SmartThemeBlurTintColor));
+}
+
+.quicker-api__switch-input:checked + .quicker-api__switch-track {
+    background: var(--quicker-api-success);
+}
+
+.quicker-api__switch-input:checked + .quicker-api__switch-track > .quicker-api__switch-thumb {
+    transform: translateX(0.8rem);
+}
+
+.quicker-api__switch:has(.quicker-api__switch-input:checked) .quicker-api__switch-label {
+    color: var(--quicker-api-success);
+    opacity: 1;
+}
+
+.quicker-api__switch:has(.quicker-api__switch-input:focus-visible) {
+    outline: 2px solid var(--SmartThemeQuoteColor);
+    outline-offset: 2px;
+}
+
+.quicker-api__switch:has(.quicker-api__switch-input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.quicker-api__preset-link {
+    margin-left: 0.35rem;
 }
 
 .quicker-api__row > .text_pole,
@@ -1227,8 +1307,7 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
 }
 
 .quicker-api__quick-field > .text_pole,
-.quicker-api__quick-model-control,
-.quicker-api__quick-model-control > .text_pole {
+.quicker-api__quick-model-control {
     width: 100%;
     min-width: 0;
     max-width: 100%;
@@ -1238,13 +1317,15 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.4rem;
+    align-items: center;
 }
 
-.quicker-api__quick-model-control > .text_pole:first-child {
-    grid-column: 1 / -1;
+.quicker-api__quick-model-control > .quicker-api__model-picker {
+    min-width: 0;
 }
 
 .quicker-api__quick-model-control > .menu_button {
+    margin: 0;
     white-space: nowrap;
 }
 
@@ -1496,11 +1577,6 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
         grid-template-columns: minmax(0, 1fr);
         gap: 0.25rem;
     }
-
-    .quicker-api__quick-model-control > .text_pole,
-    .quicker-api__quick-model-control > .menu_button {
-        flex: 1 1 100%;
-    }
 }
 
 
@@ -1560,7 +1636,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
         padding-inline: 0.4rem;
     }
 
-    #quicker_api_manage_models {
+    #quicker_api_channels {
         grid-column: 1;
         grid-row: 3;
         justify-self: start;
@@ -1675,7 +1751,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
 
 .quicker-api__model-tabs {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.3rem;
 }
 
@@ -1786,6 +1862,35 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* Provider sections of the favorites view; a row in another section applies that provider. */
+.quicker-api__model-group {
+    display: flex;
+    grid-column: 1 / -1;
+    min-width: 0;
+    align-items: baseline;
+    gap: 0.4rem;
+    padding: 0.35rem 0.2rem 0.1rem;
+    font-weight: 600;
+    opacity: 0.85;
+}
+
+.quicker-api__model-group:first-child {
+    padding-top: 0;
+}
+
+.quicker-api__model-group-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__model-group small {
+    flex: none;
+    font-weight: normal;
+    opacity: 0.7;
 }
 
 .quicker-api__model-option-badges {
@@ -2032,4 +2137,608 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
    这里用更高优先级恢复与 PC 一致的紧凑间距。 */
 .list-group.quicker-api__quick-menu > .list-group-item.ctx-item {
     padding: 5px;
+}
+
+/* Format tag on models spoken in a format other than their provider's. */
+.quicker-api__model-format-tag {
+    padding: 0 0.4rem;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor) 55%, transparent);
+    border-radius: 999px;
+    color: var(--SmartThemeQuoteColor);
+    font-size: 0.72em;
+    line-height: 1.5;
+    opacity: 1 !important;
+}
+
+/* "格式" view rows: model with its provider underneath. */
+.quicker-api__model-option--provider .quicker-api__model-option-name {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    line-height: 1.2;
+}
+
+.quicker-api__model-option--provider .quicker-api__model-option-name > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__model-option-provider {
+    overflow: hidden;
+    font-size: 0.75em;
+    opacity: 0.6;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__model-group.is-current .quicker-api__model-group-name {
+    color: var(--SmartThemeQuoteColor);
+}
+
+/* ---------------------------------------------------------------------------
+   Channel manager: channel list + detail (connection card, model catalog).
+   --------------------------------------------------------------------------- */
+.quicker-api__channels {
+    --quicker-api-channel-radius: 12px;
+    display: grid;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 0;
+    flex: 1 1 auto;
+    grid-template-columns: minmax(13rem, 16rem) minmax(0, 1fr);
+    gap: 0.9rem;
+    color: var(--SmartThemeBodyColor);
+    text-align: left;
+}
+
+.quicker-api__channels * {
+    box-sizing: border-box;
+}
+
+.quicker-api__channels .menu_button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    margin: 0;
+    min-height: 2.1rem;
+    line-height: 1.15;
+    white-space: nowrap;
+}
+
+.quicker-api__channels-sidebar {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 80%, transparent);
+    border-radius: var(--quicker-api-channel-radius);
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 70%, transparent);
+}
+
+.quicker-api__channels-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.quicker-api__channels-head h3,
+.quicker-api__channel-heading h3 {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0;
+    font-size: 1.05em;
+}
+
+.quicker-api__channel-new {
+    border-color: color-mix(in srgb, var(--quicker-api-success) 60%, var(--SmartThemeBorderColor));
+    color: var(--quicker-api-success);
+}
+
+.quicker-api__channels-list {
+    display: flex;
+    min-height: 0;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 0.35rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.quicker-api__channel-item {
+    display: grid;
+    width: 100%;
+    align-items: center;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 0.6rem;
+    padding: 0.5rem 0.55rem;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.quicker-api__channel-item:hover {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 7%, transparent);
+}
+
+.quicker-api__channel-item:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor);
+    outline-offset: 1px;
+}
+
+.quicker-api__channel-item.is-active {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 60%, var(--SmartThemeBorderColor));
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 16%, var(--SmartThemeBlurTintColor));
+}
+
+.quicker-api__channel-avatar {
+    display: inline-grid;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 28%, transparent);
+    font-weight: 700;
+}
+
+.quicker-api__channel-text {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.quicker-api__channel-name,
+.quicker-api__channel-format {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__channel-name {
+    font-weight: 600;
+}
+
+.quicker-api__channel-format {
+    font-size: 0.78em;
+    opacity: 0.65;
+}
+
+.quicker-api__channel-flags {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.quicker-api__channel-live,
+.quicker-api__channel-dirty {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+}
+
+.quicker-api__channel-live {
+    background: var(--quicker-api-success);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--quicker-api-success) 25%, transparent);
+}
+
+.quicker-api__channel-dirty {
+    background: #ffae35;
+}
+
+.quicker-api__channel-detail {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+    gap: 0.75rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 0.15rem;
+}
+
+.quicker-api__channel-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.quicker-api__channel-back {
+    display: none !important;
+}
+
+/* Title with the live badge right after it; a long title is truncated, the badge stays. */
+.quicker-api__channel-heading {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.quicker-api__channel-heading > .quicker-api__channel-title {
+    display: block;
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quicker-api__channel-heading > .quicker-api__channel-badge {
+    flex: 0 0 auto;
+}
+
+.quicker-api__channel-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.quicker-api__channel-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.1rem 0.55rem;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 999px;
+    font-size: 0.8em;
+    white-space: nowrap;
+}
+
+.quicker-api__channel-badge.is-live {
+    border-color: #6fdc8c99;
+    background: #6fdc8c26;
+    color: #8ee8a6;
+}
+
+.quicker-api__channel-badge.is-live i {
+    font-size: 0.55em;
+}
+
+.quicker-api__channel-delete {
+    border-color: color-mix(in srgb, var(--quicker-api-danger) 65%, var(--SmartThemeBorderColor)) !important;
+    color: var(--quicker-api-danger);
+}
+
+.quicker-api__channel-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 0.8rem 0.9rem;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 80%, transparent);
+    border-radius: var(--quicker-api-channel-radius);
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 70%, transparent);
+}
+
+.quicker-api__channel-card > h4 {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0;
+    font-size: 0.95em;
+    opacity: 0.9;
+}
+
+.quicker-api__channel-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem 0.8rem;
+}
+
+.quicker-api__channel-field {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 0;
+    font-weight: normal;
+}
+
+.quicker-api__channel-field.is-wide {
+    grid-column: 1 / -1;
+}
+
+.quicker-api__channel-field[hidden] {
+    display: none;
+}
+
+.quicker-api__channel-field > span {
+    font-size: 0.82em;
+    opacity: 0.7;
+}
+
+.quicker-api__channel-field .text_pole {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+.quicker-api__channel-key {
+    display: flex;
+    gap: 0.35rem;
+}
+
+.quicker-api__channel-key > .text_pole {
+    flex: 1 1 auto;
+}
+
+.quicker-api__channel-hint {
+    opacity: 0.7;
+    overflow-wrap: anywhere;
+}
+
+.quicker-api__channel-empty {
+    display: flex;
+    min-height: 16rem;
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    border: 1px dashed var(--SmartThemeBorderColor);
+    border-radius: var(--quicker-api-channel-radius);
+    opacity: 0.8;
+}
+
+.quicker-api__channel-empty > i {
+    font-size: 2rem;
+    opacity: 0.5;
+}
+
+/* The catalog inside a channel: always one page (favorites / remote) at a time. */
+.quicker-api__channels .quicker-api__model-manager--paged {
+    width: 100%;
+    height: auto;
+    gap: 0.55rem;
+}
+
+.quicker-api__channels .quicker-api__manager-pages {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.35rem;
+}
+
+.quicker-api__channels .quicker-api__manager-pages > button {
+    width: 100%;
+    min-width: 0;
+    opacity: 0.75;
+}
+
+.quicker-api__channels .quicker-api__manager-pages > button.is-active {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 75%, var(--SmartThemeBorderColor));
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 22%, var(--SmartThemeBlurTintColor));
+    opacity: 1;
+}
+
+.quicker-api__channels .quicker-api__manager-pages > button > small {
+    opacity: 0.75;
+}
+
+.quicker-api__channels .quicker-api__manager-pages > button.has-stale > small {
+    color: color-mix(in srgb, #ffae35 82%, var(--SmartThemeBodyColor));
+    opacity: 1;
+}
+
+.quicker-api__channels .quicker-api__manager-columns {
+    display: block;
+    min-height: 0;
+}
+
+.quicker-api__channels .quicker-api__model-manager--paged[data-page="remote"] .quicker-api__manager-panel[data-page="chosen"],
+.quicker-api__channels .quicker-api__model-manager--paged[data-page="chosen"] .quicker-api__manager-panel[data-page="remote"] {
+    display: none;
+}
+
+.quicker-api__channels .quicker-api__manager-panel {
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
+.quicker-api__channels .quicker-api__manager-panel > h4 {
+    display: none;
+}
+
+.quicker-api__channels .quicker-api__model-list {
+    min-height: 8rem;
+    max-height: 22rem;
+}
+
+.quicker-api__channels .quicker-api__fetch-hint {
+    color: var(--warning-color, #e6a23c);
+    opacity: 1;
+}
+
+.quicker-api__channels .quicker-api__fetch-hint[hidden] {
+    display: none;
+}
+
+.quicker-api__channels .quicker-api__chosen-model {
+    grid-template-columns: 1.7rem minmax(6rem, 1fr) auto minmax(7rem, 9.5rem) auto;
+}
+
+.quicker-api__model-format-select {
+    min-width: 0;
+    width: 100% !important;
+    max-width: none !important;
+    justify-self: stretch;
+    margin: 0;
+    padding-block: 0.2rem;
+    font-size: 0.85em;
+    text-overflow: ellipsis;
+}
+
+.quicker-api__model-format-select[hidden] {
+    display: none;
+}
+
+.quicker-api__chosen-model.has-format .quicker-api__model-format-select {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 70%, var(--SmartThemeBorderColor));
+    color: var(--SmartThemeQuoteColor);
+}
+
+@container (max-width: 30rem) {
+    /* Narrow detail pane: name / format / actions each get a full line so
+       the format select is never squeezed beside the action buttons. */
+    .quicker-api__channels .quicker-api__chosen-model {
+        grid-template-columns: 1.7rem minmax(0, 1fr) auto;
+        row-gap: 0.35rem;
+    }
+
+    .quicker-api__channels .quicker-api__chosen-model > .quicker-api__model-format-select {
+        grid-row: 2;
+        grid-column: 2 / -1;
+    }
+
+    .quicker-api__channels .quicker-api__chosen-model > .quicker-api__item-actions {
+        grid-row: 3;
+        grid-column: 2 / -1;
+        justify-content: flex-end;
+    }
+}
+
+/* The dialog has a fixed size that fits the viewport; only the lists inside scroll. */
+dialog.popup:has(.quicker-api__channels) {
+    width: min(calc(100dvw - 2rem), 96rem) !important;
+    max-width: calc(100dvw - 1rem) !important;
+    height: min(calc(100dvh - 2rem), 56rem) !important;
+    min-height: 0;
+    max-height: calc(100dvh - 1rem);
+    box-sizing: border-box;
+}
+
+dialog.popup:has(.quicker-api__channels) .popup-body {
+    min-height: 0;
+    max-height: none;
+}
+
+dialog.popup:has(.quicker-api__channels) .popup-content {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Wide screens: the model catalog gets its own column beside the connection. */
+@media (min-width: 1100px) {
+    .quicker-api__channel-detail {
+        display: grid;
+        grid-template-columns: minmax(17rem, 0.65fr) minmax(0, 1.35fr);
+        grid-template-rows: auto minmax(0, 1fr);
+        align-items: start;
+        overflow: hidden;
+        padding-right: 0;
+    }
+
+    .quicker-api__channel-header,
+    .quicker-api__channel-empty {
+        grid-column: 1 / -1;
+    }
+
+    .quicker-api__channel-empty {
+        grid-row: 1 / -1;
+        align-self: stretch;
+    }
+
+    .quicker-api__channel-card[data-card="connection"] {
+        max-height: 100%;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    .quicker-api__channel-card[data-card="connection"] .quicker-api__channel-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .quicker-api__channel-card[data-card="models"] {
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .quicker-api__channel-card[data-card="models"] .quicker-api__model-manager--paged {
+        display: flex;
+        min-height: 0;
+        flex: 1 1 auto;
+        flex-direction: column;
+    }
+
+    .quicker-api__channel-card[data-card="models"] .quicker-api__manager-columns {
+        display: flex;
+        min-height: 0;
+        flex: 1 1 auto;
+        flex-direction: column;
+    }
+
+    .quicker-api__channel-card[data-card="models"] .quicker-api__manager-panel:not([hidden]) {
+        display: flex;
+        min-height: 0;
+        flex: 1 1 auto;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .quicker-api__channel-card[data-card="models"] .quicker-api__model-list {
+        min-height: 0;
+        max-height: none;
+        flex: 1 1 auto;
+    }
+}
+
+dialog.popup:has(.quicker-api__channels) .popup-controls .menu_button {
+    min-width: 5rem;
+    filter: none !important;
+    transform: none !important;
+}
+
+@media (max-width: 760px) {
+    .quicker-api__channels {
+        display: block;
+    }
+
+    .quicker-api__channels[data-view="detail"] > .quicker-api__channels-sidebar,
+    .quicker-api__channels[data-view="list"] > .quicker-api__channel-detail {
+        display: none;
+    }
+
+    .quicker-api__channels-sidebar,
+    .quicker-api__channel-detail {
+        height: 100%;
+    }
+
+    .quicker-api__channel-back {
+        display: inline-flex !important;
+        flex: 0 0 auto;
+    }
+
+    .quicker-api__channel-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .quicker-api__channel-delete > span {
+        display: none;
+    }
+
+    .quicker-api__channels .quicker-api__model-list {
+        max-height: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .quicker-api__channels *,
+    .quicker-api__switch,
+    .quicker-api__switch * {
+        transition: none !important;
+    }
 }

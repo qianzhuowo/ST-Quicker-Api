@@ -218,12 +218,12 @@ export async function runV310Regressions({ page, log, setViewport }) {
 
     // The title switch hands the connection to the host's own UI and back.
     await run(`if (!$('#custom_form').length) $('#openai_api').append('<div id="custom_form" data-fixture="native-ui"></div>'); settings().selectedProfileId='v310-a'; renderProfiles('v310-a'); applyProfileById('v310-a')`);
-    const toggleMode = () => run(`$('#quicker_api_mode').trigger('click'); new Promise(r => setTimeout(r, 20)).then(() => operationQueue)`);
+    const toggleMode = () => run(`document.querySelector('.quicker-api__mode-switch').click(); new Promise(r => setTimeout(r, 20)).then(() => operationQueue)`);
     await toggleMode();
     const nativeMode = await run(`(() => ({
-        nativeUi: settings().nativeUi, panel: $('#quicker_api').hasClass('is-native-ui'), checked: $('#quicker_api_mode').attr('aria-checked'),
+        nativeUi: settings().nativeUi, panel: $('#quicker_api').hasClass('is-native-ui'), checked: $('#quicker_api_mode').prop('checked'), label: $('.quicker-api__mode-switch .quicker-api__switch-label').text(),
         body: getComputedStyle(document.getElementById('quicker_api_body')).display, provider: $('#custom_form').hasClass('quicker-api__native-provider') }))()`);
-    assert.deepEqual(nativeMode, { nativeUi: true, panel: true, checked: 'false', body: 'none', provider: false });
+    assert.deepEqual(nativeMode, { nativeUi: true, panel: true, checked: false, label: '插件启用', body: 'none', provider: false });
     await run(`togglePanel(); $('#custom_api_url_text').val('https://native.invalid/v1').trigger('input'); oai_settings.bind_preset_to_connection = false; switchTestPreset(currentPresetName() === 'A' ? 'B' : 'A')`);
     assert.deepEqual(await run(`[oai_settings.custom_url, panelCollapsed]`), ['https://native.invalid/v1', false], 'native mode neither re-applies bound Profiles nor folds the panel');
     await toggleMode();

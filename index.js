@@ -111,6 +111,10 @@ const DEFAULT_SETTINGS = {
     selectedProfileId: null,
     activeProfileId: null,
     emptySecretIds: {},
+    // Off by default: native presets carry prompts/parameters only and never
+    // switch the provider. When on, a preset applies and records its bound
+    // Profile (presetBindings/presetModels are kept either way).
+    presetLink: false,
     presetBindings: {},
     presetModels: {},
     migratedFromCustomOpenAIProfiles: false,
@@ -131,9 +135,11 @@ let pendingOperations = 0;
 let syncingEditorModel = 0;
 // Model picker view is session-only: every page load starts on favorites, and a
 // successful fetch switches to the full list until the user switches back.
-let modelPickerView = 'favorites';
+// Every model dropdown is the same component; a host supplies its data and
+// what picking means. Only one dropdown is open at a time.
+const modelPickerHosts = new Map();
+let openModelPickerHost = null;
 let modelPickerProfile = null;
-const modelPickerAutoFetched = new Set();
 let keyEditorDirty = false;
 let nativeCreateMonitor = null;
 let nativeIntentExpiry = null;
@@ -337,6 +343,19 @@ function getActiveSecret(key) {
     return getSecretEntries(key).find(entry => entry.active) || null;
 }
 
+function presetLinkEnabled() {
+    return settings().presetLink === true;
+}
+
+// With preset linking off, a native preset must not touch the connection the
+// selected provider owns, whatever the host's own bind_preset_to_connection is.
+function stripPresetConnection(preset, settingsToUpdate) {
+    if (!preset || typeof preset !== 'object' || !settingsToUpdate || typeof settingsToUpdate !== 'object') return;
+    for (const [key, entry] of Object.entries(settingsToUpdate)) {
+        if (Array.isArray(entry) && entry[3] === true) delete preset[key];
+    }
+}
+
 function selectedProfile() {
     const id = String($('#quicker_api_profile_select').val() || '');
     return profiles().find(profile => profile.id === id) || null;
@@ -419,6 +438,57 @@ function normalizeQuickUrl(raw) {
     };
 }
 
+function normalizeModelFormats(raw, format) {
+    if (!raw || typeof raw !== 'object' || format === 'opencode') return {};
+    return Object.fromEntries(Object.entries(raw)
+        .map(([model, value]) => [normalizeText(model).slice(0, 500), String(value || '')])
+        .filter(([model, value]) => model && value !== format && value !== 'opencode' && Object.hasOwn(FORMATS, value)));
+}
+
+function normalizeExtraCredentials(raw) {
+    if (!raw || typeof raw !== 'object') return {};
+    return Object.fromEntries(Object.entries(raw)
+        .map(([slot, value]) => [String(slot), String(value || '')])
+        .filter(([slot, value]) => slot && value));
+}
+
+function favoriteEntries(raw, favorites) {
+    if (!raw || typeof raw !== 'object') return {};
+    const keep = new Set(favorites);
+    return Object.fromEntries(Object.entries(raw).filter(([model]) => keep.has(normalizeText(model))));
+}
+
+// The single way to change a provider's favorites: format overrides exist only
+// for favorites, and extra credentials only for the key slots those overrides
+// still use. Quicker proxy presets nobody uses any more are released.
+function setFavoriteModels(profile, models) {
+    const before = profileProxyNames(profile);
+    profile.availableModels = normalizeModelList(models);
+    profile.modelFormats = normalizeModelFormats(favoriteEntries(profile.modelFormats, profile.availableModels), profile.format);
+    const primary = credentialSlot(profile.format, profile.endpoint);
+    const needed = new Set(profileFormats(profile).map(format => credentialSlot(format, profile.endpoint)).filter(slot => slot !== primary));
+    profile.extraCredentials = Object.fromEntries(Object.entries(profile.extraCredentials || {}).filter(([slot]) => needed.has(slot)));
+    releaseUnusedProxyPresets(before);
+}
+
+function profileProxyNames(profile) {
+    return [profile?.proxyPreset, profile?.extraCredentials?.proxy].filter(Boolean);
+}
+
+// Remove Quicker-created proxy presets among `names` that no channel, Connection
+// Manager profile or the host's current selection uses. Native keys are never
+// deleted: a key may be shared, and the user manages them in the key manager.
+function releaseUnusedProxyPresets(names) {
+    const used = new Set(profiles().flatMap(profileProxyNames));
+    const selected = $('#openai_proxy_preset').val();
+    for (const name of new Set(names)) {
+        if (!name.startsWith('Quicker · ') || used.has(name) || name === selected || proxyPresetIsShared(name, '')) continue;
+        const index = proxies.findIndex(proxy => proxy.name === name);
+        if (index >= 0) proxies.splice(index, 1);
+        $('#openai_proxy_preset option').filter((_, option) => option.value === name).remove();
+    }
+}
+
 function normalizeProfile(raw) {
     const format = normalizeFormat(raw?.format);
     const model = String(raw?.model || '').slice(0, 500);
@@ -454,6 +524,10 @@ function normalizeProfile(raw) {
         secretId: String(raw?.secretId || ''),
         proxyPreset: String(raw?.proxyPreset || ''),
         needsSecret: Boolean(raw?.needsSecret),
+        // Per-model protocol overrides, only for favorites; a model without one uses `format`.
+        modelFormats: normalizeModelFormats(favoriteEntries(raw?.modelFormats, availableModels), format),
+        // Credentials of other key slots those overrides need (slot -> secret id / proxy preset).
+        extraCredentials: normalizeExtraCredentials(raw?.extraCredentials),
         // Opaque source reference used only to suppress already-migrated native
         // entries when their credential cannot be exposed across secret slots.
         nativeImportFingerprint: String(raw?.nativeImportFingerprint || '').slice(0, 5000),
@@ -512,6 +586,7 @@ function initializeSettings() {
     }
     value.blockedSecretKeys = value.blockedSecretKeys && typeof value.blockedSecretKeys === 'object' ? value.blockedSecretKeys : {};
     value.nativeUi = value.nativeUi === true;
+    value.presetLink = value.presetLink === true;
     value.quickActionPlacement = ['leftSendForm', 'rightSendForm', 'qrButtons', 'disabled'].includes(value.quickActionPlacement)
         ? value.quickActionPlacement
         : 'rightSendForm';
@@ -607,7 +682,11 @@ function toolbarHtml() {
                     <span class="quicker-api__native-hint">已切回原生界面</span>
                     <i class="fa-solid fa-chevron-up quicker-api__chevron" aria-hidden="true"></i>
                 </button>
-                <button id="quicker_api_mode" class="menu_button quicker-api__mode-switch" type="button" role="switch" aria-checked="true" title="关闭后切回 SillyTavern 原生界面"><i class="fa-solid fa-toggle-on" aria-hidden="true"></i><span>插件界面</span></button>
+                <label class="quicker-api__switch quicker-api__mode-switch" for="quicker_api_mode" title="关闭后切回 SillyTavern 原生界面">
+                    <input id="quicker_api_mode" class="quicker-api__switch-input" type="checkbox" role="switch" checked />
+                    <span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>
+                    <span class="quicker-api__switch-label">插件启用</span>
+                </label>
             </div>
             <div id="quicker_api_body">
             <div class="quicker-api__field quicker-api__profile-field">
@@ -663,6 +742,11 @@ function toolbarHtml() {
                 <label>参数</label>
                 <div class="quicker-api__row">
                     <button id="quicker_api_additional_parameters" class="menu_button quicker-api__text-button" type="button" title="打开 SillyTavern 原生附加参数编辑器"><i class="fa-solid fa-sliders"></i><span>附加参数</span></button>
+                    <label class="quicker-api__switch quicker-api__preset-link" for="quicker_api_preset_link" title="开启后：切换原生预设会应用它绑定的 API 配置，保存预设或 API 配置会记录绑定。关闭时：预设只管提示词与参数，不改供应商、URL 与模型。">
+                        <input id="quicker_api_preset_link" class="quicker-api__switch-input" type="checkbox" role="switch" />
+                        <span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>
+                        <span class="quicker-api__switch-label">联动预设</span>
+                    </label>
                 </div>
             </div>
             <div id="quicker_api_status" class="quicker-api__status"></div>
@@ -760,15 +844,178 @@ function profileHasCredential(profile, format, endpoint) {
         && getSecretEntry(config.secretKey, profile.secretId));
 }
 
+function credentialSlot(format, endpoint) {
+    return usesProxyProfile(format, endpoint) ? 'proxy' : FORMATS[format].secretKey;
+}
+
+// The plaintext a Profile authenticates with, '' when it has none, or null when
+// the host does not expose it.
+async function readProfileCredential(profile) {
+    if (usesProxyProfile(profile.format, profile.endpoint)) return String(getBoundProxyPreset(profile)?.password || '');
+    const key = FORMATS[profile.format].secretKey;
+    if (!profile.secretId || profile.secretId === settings().emptySecretIds[key]) return '';
+    return await findSecretBounded(key, profile.secretId);
+}
+
+// Formats a single model may use instead of its provider's format. OpenCode has
+// its own endpoint semantics, so it neither gives nor takes per-model formats.
+function modelFormatChoices(profile) {
+    if (!profile || profile.format === 'opencode') return [];
+    return Object.keys(FORMATS).filter(format => format !== 'opencode' && isFormatSupported(format));
+}
+
+// The format a model of this provider is spoken in: its own override, else the provider's.
+function effectiveFormat(profile, model) {
+    const override = profile?.modelFormats?.[normalizeText(model)];
+    return override && override !== profile.format && modelFormatChoices(profile).includes(override) ? override : profile?.format;
+}
+
+function profileFormats(profile) {
+    if (!profile) return [];
+    const choices = modelFormatChoices(profile);
+    return [...new Set([profile.format, ...Object.values(profile.modelFormats || {}).filter(format => choices.includes(format))])];
+}
+
+// The connection a provider makes when it speaks `format`: its own fields and
+// URL, with the credential of the key slot that format uses. The provider's
+// own format is the provider itself.
+function connectionFor(profile, format = profile?.format) {
+    if (!profile || !format || format === profile.format) return profile;
+    const slot = credentialSlot(format, profile.endpoint);
+    const extra = profile.extraCredentials || {};
+    const credential = slot === credentialSlot(profile.format, profile.endpoint)
+        ? { secretId: profile.secretId, proxyPreset: profile.proxyPreset, needsSecret: profile.needsSecret }
+        : slot === 'proxy'
+            ? { secretId: '', proxyPreset: String(extra.proxy || ''), needsSecret: false }
+            : { secretId: String(extra[slot] || ''), proxyPreset: '', needsSecret: !extra[slot] };
+    return {
+        ...profile,
+        ...credential,
+        format,
+        opencodeApiFormat: '',
+        includeBody: supportsCustomParameters(format) ? profile.includeBody : '',
+        includeHeaders: supportsCustomParameters(format) ? profile.includeHeaders : '',
+        connectionOf: profile,
+    };
+}
+
+// The provider format the host is connected with right now, if any.
+function liveFormat(profile) {
+    return profileFormats(profile).find(format => matchesFormat(format)) || null;
+}
+
+function liveConnection(profile) {
+    return connectionFor(profile, liveFormat(profile) || profile?.format);
+}
+
+// A per-model format whose key slot differs from the provider's needs its own
+// stored credential; it never borrows whatever that slot holds.
+function connectionMissingCredential(connection) {
+    const profile = connection?.connectionOf;
+    if (!profile || credentialSlot(connection.format, connection.endpoint) === credentialSlot(profile.format, profile.endpoint)) return false;
+    if (usesProxyProfile(connection.format, connection.endpoint)) return !getBoundProxyPreset(connection);
+    return !connection.secretId || !getSecretEntry(FORMATS[connection.format].secretKey, connection.secretId);
+}
+
+function setConnectionSecret(profile, format, secretId) {
+    const slot = credentialSlot(format, profile.endpoint);
+    if (slot === credentialSlot(profile.format, profile.endpoint)) {
+        profile.secretId = secretId;
+        profile.needsSecret = false;
+    } else {
+        profile.extraCredentials = { ...profile.extraCredentials, [slot]: secretId };
+    }
+}
+
+function credentialSlotLabel(slot) {
+    if (slot === 'proxy') return '反代密码';
+    return FORMATS[Object.keys(FORMATS).find(format => FORMATS[format].secretKey === slot)]?.label || slot;
+}
+
+async function writeExtraSecret(key, value, label) {
+    // Writing rotates the slot briefly; block generation and native key
+    // adoption until the slot's live key is back.
+    const transitionWasBlocked = presetTransitionBlocked;
+    beginPresetTransition();
+    try {
+        const before = await readAuthoritativeSecretState();
+        if (!before) return '';
+        const previousId = before[key]?.find(entry => entry.active)?.id || '';
+        const result = await ensureSecret(key, value, label);
+        // An extra slot is written for later use; the live key of that slot stays.
+        if (previousId && previousId !== result.id && !await rotateSecretVerified(key, previousId)) {
+            await enterFailClosedState('额外密钥写入后无法恢复原活动密钥。', key);
+            return '';
+        }
+        return result.id;
+    } finally {
+        if (!transitionWasBlocked) endPresetTransition();
+    }
+}
+
+// The credentials for the extra key slots this provider's per-model formats
+// need, given its (new) format and URL. A typed key goes everywhere; otherwise
+// an existing extra credential stays and a missing one is carried from the
+// provider's own key. Returns the new map, or null when a key is unavailable.
+async function provisionModelCredentials(profile, format, endpoint, keyValue = '') {
+    const target = { ...profile, format, endpoint };
+    const primary = credentialSlot(format, endpoint);
+    const needed = new Map();
+    for (const modelFormat of profileFormats(target)) {
+        const slot = credentialSlot(modelFormat, endpoint);
+        if (slot !== primary && !needed.has(slot)) needed.set(slot, modelFormat);
+    }
+    const current = profile.extraCredentials || {};
+    const result = {};
+    let carried;
+    const providerKey = async () => {
+        if (carried === undefined) carried = profile.draft ? '' : await readProfileCredential(profile);
+        return carried;
+    };
+    for (const [slot, modelFormat] of needed) {
+        const typed = normalizeText(keyValue);
+        if (slot === 'proxy') {
+            const existing = current.proxy ? proxies.find(proxy => proxy.name === current.proxy) : null;
+            const password = typed || String(existing?.password || '') || await providerKey();
+            if (!password) return provisionFailed(slot);
+            result.proxy = ensureBoundProxyPreset(`${profile.name} · ${FORMATS[modelFormat].label}`, endpoint, password, current.proxy, profile.id);
+            continue;
+        }
+        if (!typed && current[slot] && getSecretEntry(slot, current[slot])) {
+            result[slot] = current[slot];
+            continue;
+        }
+        const value = typed || await providerKey();
+        if (!value) return provisionFailed(slot);
+        const id = await writeExtraSecret(slot, value, `${profile.name} · ${FORMATS[modelFormat].label}`);
+        if (!id) {
+            toastr.error(`${credentialSlotLabel(slot)} 密钥保存状态无法确认。`);
+            return null;
+        }
+        result[slot] = id;
+    }
+    return result;
+}
+
+function provisionFailed(slot) {
+    toastr.warning(`有模型使用的格式需要把密钥另存到「${credentialSlotLabel(slot)}」，但原密钥明文不可读：请在 Key 输入框填写后保存。`);
+    return null;
+}
+
 function updateCredentialEditor(profile = selectedProfile()) {
-    const format = profile?.format || normalizeFormat($('#quicker_api_format').val());
+    // Describe the credential for the connection being edited: a protocol or
+    // URL change can move it to another key slot, where it is carried on save.
+    const format = normalizeFormat($('#quicker_api_format').val() || profile?.format);
     const config = FORMATS[format];
-    const endpoint = profile?.endpoint ?? normalizeText($('#quicker_api_url').val());
+    const endpoint = normalizeText($('#quicker_api_url').val());
     const proxyMode = usesProxyProfile(format, endpoint);
-    const hasCredential = profileHasCredential(profile, format, endpoint);
-    const placeholder = proxyMode
-        ? (hasCredential ? '已配置代理密码（点击眼睛查看）' : '未配置代理密码')
-        : (hasCredential ? '已配置密钥（点击眼睛查看）' : '未配置密钥');
+    const sameSlot = Boolean(profile) && credentialSlot(profile.format, profile.endpoint) === credentialSlot(format, endpoint);
+    const hasCredential = sameSlot && profileHasCredential(profile, format, endpoint);
+    const carried = !sameSlot && profileHasCredential(profile, profile?.format, profile?.endpoint);
+    const placeholder = carried ? '保存时沿用原密钥（不可读时需重新填写）'
+        : proxyMode
+            ? (hasCredential ? '已配置代理密码（点击眼睛查看）' : '未配置代理密码')
+            : (hasCredential ? '已配置密钥（点击眼睛查看）' : '未配置密钥');
     clearKeyEditor(placeholder);
     $('#quicker_api_native_key_manager').attr('data-key', config.secretKey).data('key', config.secretKey).toggle(!proxyMode);
 }
@@ -781,7 +1028,7 @@ function getEditorModel(format = normalizeFormat($('#quicker_api_format').val())
 function syncEditorModelToNative() {
     // A draft is not connected to the host yet; its editor model stays local.
     if (selectedProfile()?.draft) return;
-    const format = normalizeFormat($('#quicker_api_format').val());
+    const format = liveFormat(selectedProfile()) || normalizeFormat($('#quicker_api_format').val());
     const config = FORMATS[format];
     const model = getEditorModel(format);
     if (platform.isModelAction(model)) return;
@@ -801,7 +1048,7 @@ function syncEditorModelToNative() {
 // new channel applied without being bound) never overwrite a binding's model.
 function recordPresetModel(profile, model) {
     if (!profile || profile.draft || settings().nativeUi || settings().activeProfileId !== profile.id) return;
-    if (presetTransitionBlocked || presetSwitchActive || !model || platform.isModelAction(model)) return;
+    if (!presetLinkEnabled() || presetTransitionBlocked || presetSwitchActive || !model || platform.isModelAction(model)) return;
     if (!profileMatchesNative(profile, { includeModel: false })) return;
     const presetName = currentPresetName();
     if (!presetName || settings().presetBindings[presetName] !== profile.id) return;
@@ -839,15 +1086,19 @@ function reconcileNativeModel() {
         nativeModelReconcileTimer = setTimeout(reconcileNativeModel, 150);
         return;
     }
-    const format = normalizeFormat($('#quicker_api_format').val());
-    if (!matchesFormat(format)) return;
     const profile = selectedProfile();
+    if (profile?.draft) return;
+    // A provider may be live in one of its per-model formats.
+    const format = profile ? liveFormat(profile) : normalizeFormat($('#quicker_api_format').val());
+    if (!format || !matchesFormat(format)) return;
     // Follow the host whenever the panel shows the host's live connection,
     // even if the Profile was not (re)applied by the plugin in this session.
-    if (profile && (profile.draft || !profileMatchesNative(profile, { includeModel: false }))) return;
+    if (profile && !profileMatchesNative(profile, { includeModel: false })) return;
     const model = nativeModelFor(format);
     if (platform.isModelAction(model) || model === getEditorModel(format)) return;
     renderModelControl(profile, model);
+    // A model the host switched on the live connection is not a Profile edit.
+    if (profile && settings().activeProfileId === profile.id) editorModelBaseline = model;
     recordPresetModel(profile, model);
     renderStatus();
 }
@@ -925,16 +1176,87 @@ function staleFavoriteModels(favorites, fetched) {
     return remote.size ? normalizeModelList(favorites).filter(model => !remote.has(model)) : [];
 }
 
-function modelPickerData() {
-    const format = normalizeFormat($('#quicker_api_format').val());
-    const profile = modelPickerProfile?.format === format ? modelPickerProfile : null;
-    const current = normalizeText($('#quicker_api_custom_model').val());
+// The main panel's dropdown: picking a model uses it on the host connection.
+const mainModelPicker = {
+    id: 'quicker_api_model',
+    view: 'favorites',
+    emptyLabel: '— 选择模型 —',
+    // The edited Profile keeps its favorites while a new protocol is drafted.
+    profile: () => modelPickerProfile,
+    format: () => normalizeFormat($('#quicker_api_format').val()),
+    current: () => normalizeText($('#quicker_api_custom_model').val()),
+    portalParent: () => document.body,
+    isPicked: profile => settings().activeProfileId === profile.id,
+    canAdd: data => Boolean(data.profile),
+    addLabel: model => `收藏并使用“${model}”`,
+    add: model => modelPickerProfile && favoriteAndUseModel(modelPickerProfile, model),
+    addAction: query => void addCustomModel(query || ''),
+    canFetch: () => true,
+    fetch: () => void enqueueOperation(fetchCustomModels),
+    pick(model, providerId) {
+        if (providerId && (providerId !== modelPickerProfile?.id || this.view === 'formats')) {
+            const provider = profiles().find(item => item.id === providerId);
+            if (provider) void useProviderModel(provider, model);
+            return;
+        }
+        $('#quicker_api_custom_model').val(model).trigger('change');
+    },
+};
+modelPickerHosts.set(mainModelPicker.id, mainModelPicker);
+
+function modelPickerHostOf(element) {
+    return modelPickerHosts.get($(element).closest('[data-picker-host]').attr('data-picker-host')) || null;
+}
+
+function modelPickerData(host = mainModelPicker) {
+    const profile = host.profile();
+    const format = host.format();
+    const current = host.current();
     const favorites = normalizeModelList(profile?.availableModels || []);
     const fetched = profileFetchedModels(profile);
-    // "All" is the latest remote snapshot; the host's built-in list is only a
-    // fallback before anything has been fetched.
-    const all = fetched.length ? fetched : normalizeModelList(nativeProviderModels(format));
-    return { format, profile, current, favorites, fetched, all, stale: new Set(staleFavoriteModels(favorites, fetched)) };
+    // "All" is one provider's last manually fetched list; the host's built-in
+    // list is only a fallback before anything has been fetched. Nothing is
+    // ever fetched automatically, and without a provider there is no list.
+    const all = fetched.length ? fetched : profile ? normalizeModelList(nativeProviderModels(format)) : [];
+    // Favorites of every other saved provider; picking one applies that provider.
+    const providers = profiles()
+        .filter(item => item !== profile && !item.draft && isFormatSupported(item.format) && normalizeModelList(item.availableModels).length)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    // Every saved provider's favorites, grouped by the format each model is spoken in.
+    const byFormat = new Map();
+    const owners = [profile, ...providers].filter(item => item && !item.draft && isFormatSupported(item.format));
+    for (const owner of owners) {
+        for (const model of normalizeModelList(owner.availableModels)) {
+            const modelFormat = effectiveFormat(owner, model);
+            if (!byFormat.has(modelFormat)) byFormat.set(modelFormat, []);
+            byFormat.get(modelFormat).push({ profile: owner, model });
+        }
+    }
+    const formatGroups = Object.keys(FORMATS).filter(key => byFormat.has(key)).map(key => ({ format: key, entries: byFormat.get(key) }));
+    return { host, format, profile, current, favorites, fetched, all, providers, formatGroups, stale: new Set(staleFavoriteModels(favorites, fetched)) };
+}
+
+const FORMAT_SHORT_LABELS = Object.freeze({
+    openai: 'OpenAI 兼容',
+    openai_responses: 'OpenAI Responses',
+    claude_messages: 'Claude Messages',
+    gemini_generate_content: 'Gemini generateContent',
+    gemini_interactions: 'Gemini Interactions',
+    anthropic: 'Anthropic',
+    gemini: 'Gemini',
+    opencode: 'OpenCode',
+});
+
+function formatShortLabel(format) {
+    return FORMAT_SHORT_LABELS[format] || FORMATS[format]?.label || format;
+}
+
+// Marks a model that is spoken in a format other than its provider's.
+function modelFormatTag(profile, model) {
+    if (!profile) return null;
+    const modelFormat = effectiveFormat(profile, model);
+    if (modelFormat === profile.format) return null;
+    return $('<small class="quicker-api__model-format-tag">').text(formatShortLabel(modelFormat)).attr('title', `此模型使用 ${FORMATS[modelFormat].label} 格式`);
 }
 
 function renderModelControl(profile = selectedProfile(), modelOverride = null) {
@@ -946,7 +1268,7 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
     const reopen = root.find('.quicker-api__model-picker').hasClass('is-open');
     const query = String(previousSearch.val() ?? '');
     const refocus = previousSearch.is(':focus');
-    if (reopen) unbindModelPickerPosition();
+    if (reopen) closeModelPicker({ host: mainModelPicker });
     previousDropdown.remove();
     $('#quicker_api_model_portal').remove();
     root.empty();
@@ -958,59 +1280,69 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
         .append($('<option>').val('').text('— 选择模型 —'));
     for (const model of models) select.append($('<option>').val(model).text(model));
     select.val(current);
-    const picker = $(`<div class="quicker-api__model-picker">
-        <button id="quicker_api_model_trigger" class="text_pole quicker-api__model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="quicker_api_model_dropdown" aria-label="选择模型">
+    root.append(
+        buildModelPicker(mainModelPicker),
+        select,
+        $('<button id="quicker_api_add_model" class="menu_button" type="button" title="添加模型到收藏并使用" aria-label="添加模型到收藏并使用"><i class="fa-solid fa-plus"></i><span class="quicker-api__desktop-label">添加</span><span class="quicker-api__mobile-label">添加模型</span></button>'),
+        $('<button id="quicker_api_fetch_models" class="menu_button" type="button" title="获取模型并切换到“全部”列表"><i class="fa-solid fa-arrows-rotate"></i><span class="quicker-api__desktop-label">获取模型</span><span class="quicker-api__mobile-label">获取模型</span></button>'),
+        $('<button id="quicker_api_channels" class="menu_button" type="button" title="渠道管理：供应商连接、收藏模型与单模型协议"><i class="fa-solid fa-server"></i><span class="quicker-api__desktop-label">渠道管理</span><span class="quicker-api__mobile-label">渠道管理</span></button>'),
+        $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
+    );
+    updateModelTrigger(mainModelPicker);
+    if (reopen) openModelPicker({ host: mainModelPicker, query, focusSearch: refocus });
+    renderPanelSummary();
+}
+
+// The one dropdown markup; ids derive from the host id.
+function buildModelPicker(host) {
+    const id = host.id;
+    return $(`<div id="${id}_picker" class="quicker-api__model-picker" data-picker-host="${id}">
+        <button id="${id}_trigger" class="text_pole quicker-api__model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="${id}_dropdown" aria-label="选择模型">
             <i class="quicker-api__model-trigger-mark" aria-hidden="true"></i><span class="quicker-api__model-trigger-label"></span><i class="fa-solid fa-chevron-down quicker-api__model-trigger-caret" aria-hidden="true"></i>
         </button>
-        <div id="quicker_api_model_dropdown" class="quicker-api__model-dropdown" hidden>
+        <div id="${id}_dropdown" class="quicker-api__model-dropdown" data-picker-host="${id}" hidden>
             <div class="quicker-api__model-tabs" role="tablist" aria-label="模型列表">
                 <button type="button" role="tab" data-model-view="favorites" title="收藏的模型"><i class="fa-solid fa-star"></i><span>收藏</span><small></small></button>
                 <button type="button" role="tab" data-model-view="all" title="最近一次获取的全部模型"><i class="fa-solid fa-cloud"></i><span>全部</span><small></small></button>
+                <button type="button" role="tab" data-model-view="formats" title="所有渠道的收藏，按格式分组"><i class="fa-solid fa-layer-group"></i><span>格式</span><small></small></button>
             </div>
             <div class="quicker-api__model-search-row">
-                <input class="text_pole quicker-api__model-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索或输入新模型 ID" aria-label="搜索模型" aria-controls="quicker_api_model_options">
+                <input class="text_pole quicker-api__model-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索或输入新模型 ID" aria-label="搜索模型" aria-controls="${id}_options">
                 <button type="button" class="menu_button quicker-api__model-icon-button" data-model-picker-action="add" title="添加模型" aria-label="添加模型"><i class="fa-solid fa-plus"></i></button>
                 <button type="button" class="menu_button quicker-api__model-icon-button" data-model-picker-action="fetch" title="获取模型" aria-label="获取模型"><i class="fa-solid fa-arrows-rotate"></i></button>
                 <button type="button" class="menu_button quicker-api__model-icon-button quicker-api__model-prune" data-model-picker-action="prune" title="清理失效收藏" aria-label="清理失效收藏"><i class="fa-solid fa-broom"></i></button>
                 <button type="button" class="menu_button quicker-api__model-icon-button" data-model-picker-action="layout"><i class="fa-solid"></i></button>
             </div>
-            <div id="quicker_api_model_options" class="quicker-api__model-options" role="listbox" aria-label="模型"></div>
+            <div id="${id}_options" class="quicker-api__model-options" role="listbox" aria-label="模型"></div>
         </div>
     </div>`);
-    root.append(
-        picker,
-        select,
-        $('<button id="quicker_api_add_model" class="menu_button" type="button" title="添加模型到收藏并使用" aria-label="添加模型到收藏并使用"><i class="fa-solid fa-plus"></i><span class="quicker-api__desktop-label">添加</span><span class="quicker-api__mobile-label">添加模型</span></button>'),
-        $('<button id="quicker_api_fetch_models" class="menu_button" type="button" title="获取模型并切换到“全部”列表"><i class="fa-solid fa-arrows-rotate"></i><span class="quicker-api__desktop-label">获取模型</span><span class="quicker-api__mobile-label">获取模型</span></button>'),
-        $('<button id="quicker_api_manage_models" class="menu_button" type="button" title="批量管理收藏与远端模型列表"><i class="fa-solid fa-list-check"></i><span class="quicker-api__desktop-label">管理模型列表</span><span class="quicker-api__mobile-label">管理模型</span></button>'),
-        $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
-    );
-    updateModelTrigger();
-    if (reopen) openModelPicker({ query, focusSearch: refocus });
-    renderPanelSummary();
 }
 
-function updateModelTrigger() {
-    const trigger = $('#quicker_api_model_trigger');
+function updateModelTrigger(host = mainModelPicker) {
+    const trigger = $(`#${host.id}_trigger`);
     if (!trigger.length) return;
-    const data = modelPickerData();
+    const data = modelPickerData(host);
     const favorite = data.favorites.includes(data.current);
     const stale = Boolean(data.current && data.fetched.length && !data.all.includes(data.current));
     const mark = !data.current ? '' : stale ? 'fa-solid fa-triangle-exclamation is-stale' : favorite ? 'fa-solid fa-star is-favorite' : 'fa-solid fa-cloud';
     trigger.toggleClass('is-empty', !data.current)
         .attr('title', stale ? `${data.current}（云端最新列表中已不存在）` : (data.current || '选择模型'));
     trigger.find('.quicker-api__model-trigger-mark').attr('class', `quicker-api__model-trigger-mark ${mark}`);
-    trigger.find('.quicker-api__model-trigger-label').text(data.current || '— 选择模型 —');
+    trigger.find('.quicker-api__model-trigger-label').text(data.current || host.emptyLabel);
 }
 
-function modelPickerElement() {
-    return $('#quicker_api_model_control .quicker-api__model-picker');
+function currentModelPickerHost() {
+    return openModelPickerHost || mainModelPicker;
 }
 
-// The dropdown is portaled to <body> while open (like the quick URL menu) so it
-// never adds to the scroll height of the host's settings panel.
-function modelPickerDropdown() {
-    return $('#quicker_api_model_dropdown');
+function modelPickerElement(host = currentModelPickerHost()) {
+    return $(`#${host.id}_picker`);
+}
+
+// The dropdown is portaled out of its container while open (like the quick URL
+// menu) so it never adds to the scroll height of the panel or dialog.
+function modelPickerDropdown(host = currentModelPickerHost()) {
+    return $(`#${host.id}_dropdown`);
 }
 
 let modelPickerColumns = 1;
@@ -1077,8 +1409,10 @@ function visibleViewportRect() {
 
 function positionModelPicker() {
     modelPickerPositionFrame = 0;
-    const dropdown = document.getElementById('quicker_api_model_dropdown');
-    const trigger = document.getElementById('quicker_api_model_trigger');
+    const host = openModelPickerHost;
+    if (!host) return;
+    const dropdown = document.getElementById(`${host.id}_dropdown`);
+    const trigger = document.getElementById(`${host.id}_trigger`);
     if (!dropdown || dropdown.hidden || !trigger) return;
     const rect = trigger.getBoundingClientRect();
     const view = visibleViewportRect();
@@ -1113,7 +1447,7 @@ function positionModelPicker() {
 
 function scheduleModelPickerPosition(event) {
     // Scrolling the option list itself never moves the anchor.
-    if (event?.type === 'scroll' && event.target instanceof Node && document.getElementById('quicker_api_model_dropdown')?.contains(event.target)) return;
+    if (event?.type === 'scroll' && event.target instanceof Node && modelPickerDropdown()[0]?.contains(event.target)) return;
     if (!modelPickerPositionFrame) modelPickerPositionFrame = requestAnimationFrame(positionModelPicker);
 }
 
@@ -1131,58 +1465,71 @@ function unbindModelPickerPosition() {
     modelPickerPositionFrame = 0;
 }
 
-function openModelPicker({ query = '', focusSearch = true } = {}) {
-    const picker = modelPickerElement();
-    const dropdown = modelPickerDropdown();
+function openModelPicker({ host = mainModelPicker, query = '', focusSearch = true } = {}) {
+    if (openModelPickerHost && openModelPickerHost !== host) closeModelPicker();
+    const picker = modelPickerElement(host);
+    const dropdown = modelPickerDropdown(host);
     if (!picker.length || !dropdown.length) return;
     const wasOpen = picker.hasClass('is-open');
+    if (!wasOpen) host.opening?.();
+    openModelPickerHost = host;
     picker.addClass('is-open');
     // .openDrawer.pinnedOpen keeps the host from treating clicks here as
     // "outside the drawer"; it only exists while the dropdown is open.
-    let portal = $('#quicker_api_model_portal');
-    if (!portal.length) portal = $('<div id="quicker_api_model_portal" class="quicker-api__model-portal openDrawer pinnedOpen">').appendTo(document.body);
+    let portal = $(`#${host.id}_portal`);
+    if (!portal.length) portal = $(`<div id="${host.id}_portal" class="quicker-api__model-portal openDrawer pinnedOpen">`).appendTo(host.portalParent());
     dropdown.appendTo(portal).prop('hidden', false);
-    $('#quicker_api_model_trigger').attr('aria-expanded', 'true');
+    $(`#${host.id}_trigger`).attr('aria-expanded', 'true');
     positionModelPicker();
     if (!wasOpen) bindModelPickerPosition();
     const search = dropdown.find('.quicker-api__model-search-input').val(query);
-    renderModelPickerOptions();
+    renderModelPickerOptions(host);
     // Avoid summoning the on-screen keyboard on touch devices.
     if (focusSearch && !globalThis.matchMedia?.('(pointer: coarse)').matches) search[0]?.focus({ preventScroll: true });
 }
 
-function closeModelPicker({ focusTrigger = false } = {}) {
-    const picker = modelPickerElement();
-    const dropdown = modelPickerDropdown();
+function closeModelPicker({ host = currentModelPickerHost(), focusTrigger = false } = {}) {
+    const picker = modelPickerElement(host);
+    const dropdown = modelPickerDropdown(host);
+    if (openModelPickerHost === host) openModelPickerHost = null;
     if (!picker.hasClass('is-open')) {
         // A stale portaled dropdown must never outlive its picker.
-        if (!picker.length) $('#quicker_api_model_portal').remove();
+        if (!picker.length) $(`#${host.id}_portal`).remove();
         return;
     }
     unbindModelPickerPosition();
     picker.removeClass('is-open');
     dropdown.prop('hidden', true).appendTo(picker);
-    $('#quicker_api_model_portal').remove();
-    $('#quicker_api_model_trigger').attr('aria-expanded', 'false');
-    if (focusTrigger) $('#quicker_api_model_trigger').trigger('focus');
+    $(`#${host.id}_portal`).remove();
+    $(`#${host.id}_trigger`).attr('aria-expanded', 'false');
+    if (focusTrigger) $(`#${host.id}_trigger`).trigger('focus');
 }
 
-function renderModelPickerOptions() {
-    const picker = modelPickerDropdown();
+function renderModelPickerOptions(host = currentModelPickerHost()) {
+    const picker = modelPickerDropdown(host);
     if (!picker.length) return;
-    const data = modelPickerData();
-    const view = modelPickerView;
+    const data = modelPickerData(host);
+    const view = host.view;
     const query = normalizeText(picker.find('.quicker-api__model-search-input').val());
     picker.find('[data-model-view]').each((_, tab) => {
         const active = tab.dataset.modelView === view;
-        $(tab).toggleClass('is-active', active).attr('aria-selected', String(active))
-            .find('small').text(tab.dataset.modelView === 'favorites' ? data.favorites.length : data.all.length);
+        const count = tab.dataset.modelView === 'favorites' ? data.favorites.length
+            : tab.dataset.modelView === 'all' ? data.all.length
+                : data.formatGroups.reduce((total, group) => total + group.entries.length, 0);
+        $(tab).toggleClass('is-active', active).attr('aria-selected', String(active)).find('small').text(count);
     });
+    const list = picker.find('.quicker-api__model-options').empty();
+    if (view === 'formats') return renderFormatGroups(picker, list, data, query);
     const favorites = new Set(data.favorites);
     const base = view === 'favorites' ? data.favorites : data.all;
     const entries = (data.current && !base.includes(data.current) ? [data.current, ...base] : base)
         .filter(model => matchesModelSearch(model, query));
-    const list = picker.find('.quicker-api__model-options').empty();
+    const grouped = view === 'favorites' && data.providers.length > 0;
+    const groupHeader = profile => $('<div class="quicker-api__model-group" role="presentation">')
+        .append($('<span class="quicker-api__model-group-name">').text(profile?.name || '当前配置'),
+            profile ? $('<small>').text(FORMATS[profile.format]?.label || '') : null);
+    const currentHeader = grouped ? groupHeader(data.profile) : null;
+    if (currentHeader) list.append(currentHeader);
     for (const model of entries) {
         const isFavorite = favorites.has(model);
         const selected = model === data.current;
@@ -1195,25 +1542,75 @@ function renderModelPickerOptions() {
         if (stale) badges.append($('<i class="fa-solid fa-triangle-exclamation" title="云端最新列表中已不存在">'));
         if (selected && !base.includes(model)) badges.append($('<small>').text(view === 'favorites' && !isFavorite ? '当前·未收藏' : '当前'));
         if (selected) badges.append($('<i class="fa-solid fa-check" aria-hidden="true">'));
+        badges.prepend(modelFormatTag(data.profile, model));
         list.append($('<div class="quicker-api__model-option" role="option">')
             .attr({ 'data-model': model, 'aria-selected': String(selected), title: stale ? `${model}（云端最新列表中已不存在）` : model })
             .toggleClass('is-favorite', isFavorite).toggleClass('is-selected', selected).toggleClass('is-stale', stale)
             .append(star, $('<span class="quicker-api__model-option-name">').text(model), badges));
     }
-    if (query && data.profile && !favorites.has(query) && !data.all.includes(query) && query !== data.current) {
+    if (query && data.host.canAdd(data) && !favorites.has(query) && !data.all.includes(query) && query !== data.current) {
         list.append($('<div class="quicker-api__model-option quicker-api__model-add" role="option" aria-selected="false">')
             .attr('data-add-model', query)
-            .append($('<i class="fa-solid fa-plus" aria-hidden="true">'), $('<span class="quicker-api__model-option-name">').text(`收藏并使用“${query}”`)));
+            .append($('<i class="fa-solid fa-plus" aria-hidden="true">'), $('<span class="quicker-api__model-option-name">').text(data.host.addLabel(query))));
     }
-    if (!list.children().length) {
-        const message = !data.profile ? '请先选择并保存 API 配置'
-            : query ? '没有匹配的模型'
-                : view === 'favorites' ? '收藏为空：在“全部”中点 ☆ 收藏，或输入模型 ID 添加'
-                    : '尚未获取模型列表，点击下方“获取模型”';
-        list.append($('<div class="quicker-api__empty-state">').text(message));
+    if (grouped) {
+        if (!currentHeader.next().length) currentHeader.remove();
+        for (const provider of data.providers) {
+            const models = normalizeModelList(provider.availableModels).filter(model => matchesModelSearch(model, query));
+            if (!models.length) continue;
+            list.append(groupHeader(provider));
+            for (const model of models) {
+                const star = $('<button type="button" class="quicker-api__model-star" tabindex="-1" aria-pressed="true" title="取消收藏">')
+                    .attr('aria-label', `取消收藏 ${model}`)
+                    .append($('<i class="fa-solid fa-star">'));
+                list.append($('<div class="quicker-api__model-option is-favorite" role="option" aria-selected="false">')
+                    .attr({ 'data-model': model, 'data-profile-id': provider.id, title: `${provider.name} · ${model}（选择后切换到该供应商）` })
+                    .append(star, $('<span class="quicker-api__model-option-name">').text(model), $('<span class="quicker-api__model-option-badges">').append(modelFormatTag(provider, model))));
+            }
+        }
+    }
+    const message = query ? '没有匹配的模型'
+        : !data.profile ? (view === 'all' ? '请先选择配置，再点 ↻ 获取它的模型列表' : '请先选择并保存 API 配置')
+            : view === 'favorites' ? '收藏为空：在“全部”中点 ☆ 收藏，或输入模型 ID 添加'
+                : '尚未获取模型列表，点上方 ↻ 手动获取';
+    finishModelPickerOptions(picker, list, data, query, message);
+}
+
+// "格式" view: every saved provider's favorites grouped by the format each
+// model is spoken in. Picking a row applies that provider with that model.
+function renderFormatGroups(picker, list, data, query) {
+    for (const group of data.formatGroups) {
+        const entries = group.entries.filter(entry => matchesModelSearch(entry.model, query) || matchesModelSearch(entry.profile.name, query));
+        if (!entries.length) continue;
+        list.append($('<div class="quicker-api__model-group" role="presentation">')
+            .toggleClass('is-current', group.format === liveFormat(data.profile))
+            .append($('<span class="quicker-api__model-group-name">').text(formatShortLabel(group.format)), $('<small>').text(`${entries.length} 个模型`)));
+        for (const { profile, model } of entries) {
+            const selected = profile === data.profile && model === data.current && data.host.isPicked(profile);
+            const star = $('<button type="button" class="quicker-api__model-star" tabindex="-1" aria-pressed="true" title="取消收藏">')
+                .attr('aria-label', `取消收藏 ${model}`)
+                .append($('<i class="fa-solid fa-star">'));
+            const badges = $('<span class="quicker-api__model-option-badges">');
+            if (selected) badges.append($('<i class="fa-solid fa-check" aria-hidden="true">'));
+            list.append($('<div class="quicker-api__model-option is-favorite quicker-api__model-option--provider" role="option">')
+                .attr({ 'data-model': model, 'data-profile-id': profile.id, 'aria-selected': String(selected), title: `${profile.name} · ${model}` })
+                .toggleClass('is-selected', selected)
+                .append(star, $('<span class="quicker-api__model-option-name">').append(
+                    $('<span>').text(model),
+                    $('<small class="quicker-api__model-option-provider">').text(profile.name),
+                ), badges));
+        }
+    }
+    finishModelPickerOptions(picker, list, data, query, query ? '没有匹配的模型' : '还没有收藏的模型：在“全部”或“渠道管理”中收藏');
+}
+
+function finishModelPickerOptions(picker, list, data, query, emptyMessage) {
+    if (!list.children('.quicker-api__model-option').length) {
+        list.empty();
+        list.append($('<div class="quicker-api__empty-state">').text(emptyMessage));
     }
     const fetchLabel = data.fetched.length ? '刷新列表' : '获取模型';
-    picker.find('[data-model-picker-action="fetch"]').attr({ title: fetchLabel, 'aria-label': fetchLabel });
+    picker.find('[data-model-picker-action="fetch"]').attr({ title: fetchLabel, 'aria-label': fetchLabel }).prop('disabled', !data.host.canFetch(data));
     const pruneLabel = data.stale.size ? `清理失效收藏（${data.stale.size} 个不在云端最新列表中）` : '清理失效收藏（当前无失效收藏）';
     picker.find('[data-model-picker-action="prune"]').attr({ title: pruneLabel, 'aria-label': pruneLabel })
         .prop('disabled', !data.profile || !data.stale.size).toggleClass('has-stale', data.stale.size > 0);
@@ -1244,78 +1641,82 @@ function moveModelPickerActive(step) {
 
 function activateModelPickerOption(option) {
     const row = $(option);
+    const host = modelPickerHostOf(option) || currentModelPickerHost();
     const added = row.attr('data-add-model');
     if (added !== undefined) {
-        if (!modelPickerProfile) return;
-        closeModelPicker({ focusTrigger: true });
-        return favoriteAndUseModel(modelPickerProfile, added);
+        if (!host.canAdd(modelPickerData(host))) return;
+        closeModelPicker({ host, focusTrigger: true });
+        return host.add(added);
     }
     const model = row.attr('data-model');
     if (model === undefined) return;
-    $('#quicker_api_custom_model').val(model).trigger('change');
-    closeModelPicker({ focusTrigger: true });
+    closeModelPicker({ host, focusTrigger: true });
+    host.pick(model, row.attr('data-profile-id') || '');
 }
 
 // Same rule as the manager's "清理失效": drop favorites missing from the
 // latest remote snapshot. The current selection itself is left unchanged.
-function pruneStaleFavorites() {
-    const data = modelPickerData();
+function pruneStaleFavorites(host = currentModelPickerHost()) {
+    const data = modelPickerData(host);
     const profile = data.profile;
     if (!profile || !hasManagedModels(profile.format) || !data.stale.size) return;
-    profile.availableModels = data.favorites.filter(model => !data.stale.has(model));
+    setFavoriteModels(profile, data.favorites.filter(model => !data.stale.has(model)));
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
-    renderModelPickerOptions();
-    updateModelTrigger();
+    renderModelPickerOptions(host);
+    updateModelTrigger(host);
     toastr.success(`已移除 ${data.stale.size} 个失效收藏。${data.stale.has(data.current) ? '当前模型仍保持选中，但它已不在云端列表中。' : ''}`);
 }
 
-function toggleFavoriteModel(model) {
-    const profile = modelPickerProfile;
+function toggleFavoriteModel(model, providerId = '', host = currentModelPickerHost()) {
+    const profile = providerId ? profiles().find(item => item.id === providerId) : host.profile();
     if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
     const favorites = normalizeModelList(profile.availableModels);
-    profile.availableModels = favorites.includes(model) ? favorites.filter(item => item !== model) : [...favorites, model];
+    setFavoriteModels(profile, favorites.includes(model) ? favorites.filter(item => item !== model) : [...favorites, model]);
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
-    const index = modelPickerDropdown().find('.quicker-api__model-option').toArray().findIndex(option => option.getAttribute('data-model') === model);
-    renderModelPickerOptions();
+    const index = modelPickerDropdown(host).find('.quicker-api__model-option').toArray()
+        .findIndex(option => option.getAttribute('data-model') === model && (option.getAttribute('data-profile-id') || '') === providerId);
+    renderModelPickerOptions(host);
     if (index >= 0) setModelPickerActive(index, { scroll: false });
-    updateModelTrigger();
+    updateModelTrigger(host);
+    if (host !== mainModelPicker) updateModelTrigger(mainModelPicker);
 }
 
-function switchModelPickerView(view) {
-    modelPickerView = view === 'all' ? 'all' : 'favorites';
-    renderModelPickerOptions();
-    const data = modelPickerData();
-    const profile = data.profile;
-    if (modelPickerView !== 'all' || data.fetched.length || !profile || profile !== selectedProfile()) return;
-    // First visit to an empty full list: fetch once per profile/endpoint per session.
-    const key = `${profile.id}\n${profile.endpoint}`;
-    if (modelPickerAutoFetched.has(key)) return;
-    modelPickerAutoFetched.add(key);
-    void enqueueOperation(fetchCustomModels);
+function switchModelPickerView(view, host = currentModelPickerHost()) {
+    host.view = ['all', 'formats'].includes(view) ? view : 'favorites';
+    renderModelPickerOptions(host);
 }
 
 function bindModelPickerEvents() {
-    $(document).on('click.quickerApi', '#quicker_api_model_trigger', () => {
-        if (modelPickerElement().hasClass('is-open')) closeModelPicker();
-        else openModelPicker();
+    $(document).on('click.quickerApi', '.quicker-api__model-trigger', function () {
+        const host = modelPickerHostOf(this);
+        if (!host) return;
+        if (modelPickerElement(host).hasClass('is-open')) closeModelPicker({ host });
+        else openModelPicker({ host });
     });
-    $(document).on('keydown.quickerApi', '#quicker_api_model_trigger', event => {
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    $(document).on('keydown.quickerApi', '.quicker-api__model-trigger', function (event) {
+        const host = modelPickerHostOf(this);
+        if (host && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             event.preventDefault();
-            openModelPicker();
+            openModelPicker({ host });
         }
     });
-    $(document).on('click.quickerApi', '#quicker_api_model_dropdown [data-model-view]', function () {
-        switchModelPickerView(this.dataset.modelView);
+    $(document).on('click.quickerApi', '.quicker-api__model-dropdown [data-model-view]', function () {
+        const host = modelPickerHostOf(this);
+        if (host) switchModelPickerView(this.dataset.modelView, host);
     });
-    $(document).on('input.quickerApi', '.quicker-api__model-search-input', renderModelPickerOptions);
-    $(document).on('keydown.quickerApi', '.quicker-api__model-picker, #quicker_api_model_dropdown', event => {
+    $(document).on('input.quickerApi', '.quicker-api__model-search-input', function () {
+        const host = modelPickerHostOf(this);
+        if (host) renderModelPickerOptions(host);
+    });
+    $(document).on('keydown.quickerApi', '.quicker-api__model-picker, .quicker-api__model-dropdown', event => {
+        const host = modelPickerHostOf(event.target);
+        if (!host) return;
         if (event.key === 'Escape') {
             event.preventDefault();
             event.stopPropagation();
-            closeModelPicker({ focusTrigger: true });
+            closeModelPicker({ host, focusTrigger: true });
             return;
         }
         if (!$(event.target).is('.quicker-api__model-search-input')) return;
@@ -1329,41 +1730,49 @@ function bindModelPickerEvents() {
         } else if (event.key === 'Enter') {
             event.preventDefault();
             event.stopPropagation();
-            const active = modelPickerDropdown().find('.quicker-api__model-option.is-active');
+            const active = modelPickerDropdown(host).find('.quicker-api__model-option.is-active');
             if (active.length) activateModelPickerOption(active[0]);
         }
     });
     $(document).on('click.quickerApi', '.quicker-api__model-star', function (event) {
         event.stopPropagation();
-        toggleFavoriteModel($(this).closest('.quicker-api__model-option').attr('data-model'));
+        const row = $(this).closest('.quicker-api__model-option');
+        toggleFavoriteModel(row.attr('data-model'), row.attr('data-profile-id') || '', modelPickerHostOf(this) || currentModelPickerHost());
     });
     $(document).on('click.quickerApi', '.quicker-api__model-option', function () {
         activateModelPickerOption(this);
     });
     $(document).on('click.quickerApi', '[data-model-picker-action]', function () {
-        const query = normalizeText(modelPickerDropdown().find('.quicker-api__model-search-input').val());
-        if (this.dataset.modelPickerAction === 'add') {
-            closeModelPicker();
-            void addCustomModel(query || '');
-        } else if (this.dataset.modelPickerAction === 'layout') {
+        const host = modelPickerHostOf(this) || currentModelPickerHost();
+        const query = normalizeText(modelPickerDropdown(host).find('.quicker-api__model-search-input').val());
+        const action = this.dataset.modelPickerAction;
+        if (action === 'add') {
+            closeModelPicker({ host });
+            host.addAction(query);
+        } else if (action === 'layout') {
             cycleModelPickerLayout();
-            setModelPickerActive(modelPickerDropdown().find('.quicker-api__model-option.is-active').index(), { scroll: true });
-        } else if (this.dataset.modelPickerAction === 'prune') {
-            pruneStaleFavorites();
+            setModelPickerActive(modelPickerDropdown(host).find('.quicker-api__model-option.is-active').index(), { scroll: true });
+        } else if (action === 'prune') {
+            pruneStaleFavorites(host);
         } else {
-            void enqueueOperation(fetchCustomModels);
+            host.fetch();
         }
     });
     $(document).on('pointerdown.quickerApi', event => {
-        const picker = modelPickerElement();
-        if (picker.hasClass('is-open') && !picker[0].contains(event.target) && !modelPickerDropdown()[0]?.contains(event.target)) closeModelPicker();
+        const host = openModelPickerHost;
+        if (!host) return;
+        const picker = modelPickerElement(host);
+        if (!picker[0]?.contains(event.target) && !modelPickerDropdown(host)[0]?.contains(event.target)) closeModelPicker({ host });
     });
 }
 
 function renderProfileEditor(profile = selectedProfile(), modelOverride = null) {
     const format = profile?.format || normalizeFormat($('#quicker_api_format').val());
     $('#quicker_api_format').val(format);
-    $('#quicker_api_url').val(profile?.endpoint ?? nativeEndpoint(format));
+    // The editor only ever shows a Profile's own connection. Host fields such as
+    // reverse_proxy are shared by several providers and would leak another
+    // Profile's URL into this one.
+    $('#quicker_api_url').val(profile?.endpoint ?? '');
     renderOpenCodeFields(profile, format);
     renderModelControl(profile, modelOverride);
     editorModelBaseline = getEditorModel(format);
@@ -1381,29 +1790,32 @@ function renderProfiles(preferredId = null) {
     select.val(profiles().some(profile => profile.id === selectedId) ? selectedId : '');
     const profile = selectedProfile();
     if (profile) $('#quicker_api_format').val(profile.format);
-    const activeModel = profile && settings().activeProfileId === profile.id
-        && matchesFormat(profile.format)
-        ? String(oai_settings[FORMATS[profile.format].modelField] || '') : null;
+    const activeFormat = profile && settings().activeProfileId === profile.id ? liveFormat(profile) : null;
+    const activeModel = activeFormat ? String(oai_settings[FORMATS[activeFormat].modelField] || '') : null;
     renderProfileEditor(profile, activeModel);
     updateCredentialEditor(profile);
     renderStatus();
 }
 
 function profileMatchesNative(profile, { includeModel = true } = {}) {
-    const config = FORMATS[profile.format];
-    if (!matchesFormat(profile.format)) return false;
-    if (includeModel && String(oai_settings[config.modelField] || '') !== profile.model) return false;
-    if (nativeEndpoint(profile.format) !== profile.endpoint) return false;
-    if (profile.format === 'opencode' && oai_settings.opencode_api_format !== profile.opencodeApiFormat) return false;
-    if (usesProxyProfile(profile.format, profile.endpoint)) {
-        const proxyPreset = getBoundProxyPreset(profile);
+    // The host may be connected with the provider's own format or with one of
+    // its per-model formats; compare against that connection.
+    const format = liveFormat(profile);
+    if (!format) return false;
+    const connection = connectionFor(profile, format);
+    const config = FORMATS[format];
+    if (includeModel && (String(oai_settings[config.modelField] || '') !== profile.model || effectiveFormat(profile, profile.model) !== format)) return false;
+    if (nativeEndpoint(format) !== connection.endpoint) return false;
+    if (format === 'opencode' && oai_settings.opencode_api_format !== connection.opencodeApiFormat) return false;
+    if (usesProxyProfile(format, connection.endpoint)) {
+        const proxyPreset = getBoundProxyPreset(connection);
         if (!proxyPreset || String(oai_settings.proxy_password || '') !== String(proxyPreset.password || '')) return false;
     }
     const additional = nativeAdditionalParameters();
-    if (additional.excludeBody !== profile.excludeBody) return false;
-    return !supportsCustomParameters(profile.format)
-        || (additional.includeBody === profile.includeBody
-            && additional.includeHeaders === profile.includeHeaders);
+    if (additional.excludeBody !== connection.excludeBody) return false;
+    return !supportsCustomParameters(format)
+        || (additional.includeBody === connection.includeBody
+            && additional.includeHeaders === connection.includeHeaders);
 }
 
 function getBlockedSecretMessage(key) {
@@ -1415,13 +1827,13 @@ function getBlockedSecretMessage(key) {
 // Profile's key; otherwise saving or reloading would re-activate the old one.
 function adoptNativeActiveSecret(profile) {
     if (!profile || profile.draft || settings().activeProfileId !== profile.id) return false;
-    if (usesProxyProfile(profile.format, profile.endpoint) || !profileMatchesNative(profile, { includeModel: false })) return false;
-    const key = FORMATS[profile.format].secretKey;
+    const connection = liveConnection(profile);
+    if (usesProxyProfile(connection.format, connection.endpoint) || !profileMatchesNative(profile, { includeModel: false })) return false;
+    const key = FORMATS[connection.format].secretKey;
     if (getBlockedSecretMessage(key)) return false;
     const active = getActiveSecret(key);
-    if (!active || active.id === profile.secretId || active.id === settings().emptySecretIds[key]) return false;
-    profile.secretId = active.id;
-    profile.needsSecret = false;
+    if (!active || active.id === connection.secretId || active.id === settings().emptySecretIds[key]) return false;
+    setConnectionSecret(profile, connection.format, active.id);
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
     return true;
@@ -1431,23 +1843,30 @@ function handleNativeSecretChange(key) {
     // Plugin-owned rotations/writes run inside operations or preset transitions.
     if (extensionDisabled || teardownPending || pendingOperations || presetTransitionBlocked || settings().nativeUi) return;
     const profile = selectedProfile();
-    if (profile && FORMATS[profile.format].secretKey === key && adoptNativeActiveSecret(profile)) {
+    if (profile && FORMATS[liveConnection(profile).format].secretKey === key && adoptNativeActiveSecret(profile)) {
         updateCredentialEditor(profile);
     }
     renderStatus();
 }
 
-function editorHasUnsavedChanges(profile) {
-    if (!profile) return false;
-    const additional = nativeAdditionalParameters();
+function editorConnectionDirty(profile) {
     return normalizeFormat($('#quicker_api_format').val()) !== profile.format
         || normalizeText($('#quicker_api_url').val()) !== normalizeText(profile.endpoint)
         || (profile.format === 'opencode' && $('#quicker_api_opencode_format').val() !== profile.opencodeApiFormat)
-        || getEditorModel() !== editorModelBaseline
-        || additional.excludeBody !== profile.excludeBody
-        || (supportsCustomParameters(profile.format) && (additional.includeBody !== profile.includeBody
-            || additional.includeHeaders !== profile.includeHeaders))
         || (keyEditorDirty && Boolean(normalizeText($('#quicker_api_key_input').val())));
+}
+
+function editorHasUnsavedChanges(profile) {
+    if (!profile) return false;
+    // Parameters are compared with the connection the host is using, which
+    // may be one of the provider's per-model formats.
+    const connection = settings().activeProfileId === profile.id ? liveConnection(profile) : profile;
+    const additional = nativeAdditionalParameters();
+    return editorConnectionDirty(profile)
+        || getEditorModel() !== editorModelBaseline
+        || additional.excludeBody !== connection.excludeBody
+        || (supportsCustomParameters(connection.format) && (additional.includeBody !== connection.includeBody
+            || additional.includeHeaders !== connection.includeHeaders));
 }
 
 function renderStatus(extraMessage = '') {
@@ -1457,21 +1876,22 @@ function renderStatus(extraMessage = '') {
     if (profile) {
         if (!isFormatSupported(profile.format)) return setStatus('当前宿主不支持该格式；配置已保留但不能应用。', 'warning');
         if (profile.draft) return setStatus('新配置尚未保存：填写 URL、Key 与模型后点击“保存 API 设置”。', 'warning');
-        const proxyMode = usesProxyProfile(profile.format, profile.endpoint);
-        const blockedMessage = proxyMode ? '' : getBlockedSecretMessage(FORMATS[profile.format].secretKey);
+        const connection = liveConnection(profile);
+        const proxyMode = usesProxyProfile(connection.format, connection.endpoint);
+        const blockedMessage = proxyMode ? '' : getBlockedSecretMessage(FORMATS[connection.format].secretKey);
         if (blockedMessage) return setStatus('安全阻断：凭据状态无法确认。', 'warning');
         if (settings().activeProfileId !== profile.id) return setStatus(extraMessage || '所选 Profile 未应用。', 'warning');
         if (editorHasUnsavedChanges(profile)) return setStatus('当前修改尚未保存。', 'warning');
         if (!profileMatchesNative(profile, { includeModel: false })
-            || (!proxyMode && getActiveSecret(FORMATS[profile.format].secretKey)?.id !== profile.secretId)) {
+            || (!proxyMode && getActiveSecret(FORMATS[connection.format].secretKey)?.id !== connection.secretId)) {
             return setStatus('原生连接与所选 Profile 不一致，请重新应用。', 'warning');
         }
-        if (presetName && settings().presetBindings[presetName] !== profile.id) return setStatus('当前 preset 未绑定到所选 Profile。', 'warning');
-        if (!profileHasCredential(profile, profile.format, profile.endpoint)) return setStatus('当前 Profile 凭据为空。', 'warning');
+        if (presetLinkEnabled() && presetName && settings().presetBindings[presetName] !== profile.id) return setStatus('当前 preset 未绑定到所选 Profile。', 'warning');
+        if (!profileHasCredential(connection, connection.format, connection.endpoint)) return setStatus('当前 Profile 凭据为空。', 'warning');
         return setStatus('已保存并安全应用。');
     }
     if (Object.keys(settings().blockedSecretKeys).length) return setStatus('安全阻断：凭据状态无法确认。', 'warning');
-    if (presetName && !settings().presetBindings[presetName]) return setStatus('当前 preset 未绑定。', 'warning');
+    if (presetLinkEnabled() && presetName && !settings().presetBindings[presetName]) return setStatus('当前 preset 未绑定。', 'warning');
     setStatus(extraMessage || '所选 Profile 未应用。', 'warning');
 }
 
@@ -1506,10 +1926,12 @@ function endPresetTransition({ force = false } = {}) {
 }
 
 function requestMatchesProfile(profile, generateData) {
-    if (!profile || !matchesFormat(profile.format, generateData)) return false;
-    if (String(generateData.model || '') !== profile.model) return false;
-    const endpointField = FORMATS[profile.format].endpointField;
-    if (profile.format === 'opencode' && generateData.opencode_api_format !== profile.opencodeApiFormat) return false;
+    if (!profile) return false;
+    const format = effectiveFormat(profile, generateData.model);
+    if (!matchesFormat(format, generateData)) return false;
+    if (String(generateData.model || '') !== profile.model && !normalizeModelList(profile.availableModels).includes(String(generateData.model || ''))) return false;
+    const endpointField = FORMATS[format].endpointField;
+    if (format === 'opencode' && generateData.opencode_api_format !== profile.opencodeApiFormat) return false;
     return normalizeText(generateData[endpointField]) === normalizeText(profile.endpoint);
 }
 
@@ -1561,7 +1983,7 @@ function quickActionMatchesCurrent(action) {
     if (action.profileId) {
         const profile = profiles().find(item => item.id === action.profileId);
         if (!profile || settings().activeProfileId !== profile.id || !profileMatchesNative(profile, { includeModel: false })) return false;
-        format = profile.format;
+        format = liveFormat(profile);
     }
     return !action.model || (Boolean(format) && matchesFormat(format) && nativeModelFor(format) === action.model);
 }
@@ -1757,11 +2179,11 @@ async function rollbackOrFailClosed(config, previousSecretId, nativeSnapshot, me
     return await rollbackCredentialOrFailClosed(config, previousSecretId, message);
 }
 
-function applyNativeFields(profile, proxyPassword = '', applyModel = true) {
-    withEditorSync(() => writeNativeFields(profile, proxyPassword, applyModel));
+function applyNativeFields(profile, proxyPassword = '', applyModel = true, modelOverride = null) {
+    withEditorSync(() => writeNativeFields(profile, proxyPassword, applyModel, modelOverride));
 }
 
-function writeNativeFields(profile, proxyPassword, applyModel) {
+function writeNativeFields(profile, proxyPassword, applyModel, modelOverride = null) {
     const config = FORMATS[profile.format];
     if (profile.format === 'opencode') {
         validateOpenCodeConnection(profile.endpoint, profile.opencodeApiFormat);
@@ -1771,9 +2193,10 @@ function writeNativeFields(profile, proxyPassword, applyModel) {
     oai_settings[config.endpointField] = profile.endpoint;
     $(config.endpointInput).val(profile.endpoint).trigger('input');
     if (applyModel) {
-        oai_settings[config.modelField] = profile.model;
-        if (profile.model) {
-            if (!applyExplicitModel(profile.model, profile.format)) throw new Error('无法应用 Profile 模型，请检查模型 ID。');
+        const model = modelOverride ?? profile.model;
+        oai_settings[config.modelField] = model;
+        if (model) {
+            if (!applyExplicitModel(model, profile.format)) throw new Error('无法应用 Profile 模型，请检查模型 ID。');
         } else {
             $(config.modelInput).val('').trigger(isCustomFormat(profile.format) ? 'input' : 'change');
         }
@@ -1825,7 +2248,7 @@ function ensureBoundProxyPreset(profileName, endpoint, password, existingName = 
     return name;
 }
 
-async function applyProfile(profile, expectedGeneration = profileSelectionGeneration, keepPresetTransition = false, applyModel = true) {
+async function applyProfile(profile, expectedGeneration = profileSelectionGeneration, keepPresetTransition = false, applyModel = true, modelOverride = null) {
     if (!profile || extensionDisabled || expectedGeneration !== profileSelectionGeneration) return false;
     if (profile.draft) {
         toastr.warning(`“${profile.name}”尚未保存连接信息，不能应用。`);
@@ -1837,19 +2260,28 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
         validateOpenCodeConnection(profile.endpoint, profile.opencodeApiFormat);
     }
     if (!isFormatSupported(profile.format)) { toastr.warning('当前宿主不支持该格式；配置已保留但不能应用。'); return false; }
-    const config = FORMATS[profile.format];
+    // The model decides the protocol: a per-model format connects the provider
+    // with that format and the credential of that format's key slot.
+    const targetModel = applyModel ? normalizeText(modelOverride ?? profile.model) : '';
+    const connection = connectionFor(profile, applyModel ? effectiveFormat(profile, targetModel) : profile.format);
+    if (connectionMissingCredential(connection)) {
+        toastr.warning(`模型“${targetModel}”使用 ${FORMATS[connection.format].label} 格式，需要该格式的密钥：请在渠道管理中填写 Key 后保存。`);
+        renderProfiles(settings().selectedProfileId);
+        return false;
+    }
+    const config = FORMATS[connection.format];
     const previousSelection = settings().activeProfileId;
     const nativeSnapshot = snapshotNative();
-    const proxyMode = usesProxyProfile(profile.format, profile.endpoint);
+    const proxyMode = usesProxyProfile(connection.format, connection.endpoint);
     if (proxyMode) {
-        const proxyPreset = getBoundProxyPreset(profile);
-        if (!proxyPreset || normalizeText(proxyPreset.url) !== normalizeText(profile.endpoint)) {
+        const proxyPreset = getBoundProxyPreset(connection);
+        if (!proxyPreset || normalizeText(proxyPreset.url) !== normalizeText(connection.endpoint)) {
             toastr.error(`${config.label} 反代 Profile 缺少匹配的原生 Reverse Proxy Preset，请重新保存该 Profile。`);
             renderProfiles(settings().selectedProfileId);
             return false;
         }
         try {
-            applyNativeFields(profile, String(proxyPreset.password || ''), applyModel);
+            applyNativeFields(connection, String(proxyPreset.password || ''), applyModel, modelOverride);
             if ($('#openai_proxy_preset option').filter((_, option) => option.value === proxyPreset.name).length) {
                 $('#openai_proxy_preset').val(proxyPreset.name).trigger('change');
             }
@@ -1881,9 +2313,14 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
         return false;
     }
     const previousSecretId = authoritative[config.secretKey]?.find(entry => entry.active)?.id || '';
-    let targetSecretId = profile.secretId;
+    let targetSecretId = connection.secretId;
     if (!targetSecretId || !authoritative[config.secretKey]?.some(entry => entry.id === targetSecretId)) {
-        const expectedSecret = Boolean(profile.needsSecret || targetSecretId);
+        if (connection !== profile && credentialSlot(connection.format, connection.endpoint) !== credentialSlot(profile.format, profile.endpoint)) {
+            toastr.warning(`${config.label} 格式的密钥已不存在：请在渠道管理中填写 Key 后保存。`);
+            renderProfiles(settings().selectedProfileId);
+            return false;
+        }
+        const expectedSecret = Boolean(connection.needsSecret || targetSecretId);
         targetSecretId = await ensureEmptySecret(config.secretKey);
         if (expectedGeneration !== profileSelectionGeneration || extensionDisabled) {
             await rollbackStaleCredential(config, previousSecretId, 'Profile 已被新的原生预设取消，但密钥状态无法确认；生成请求已阻断。');
@@ -1894,7 +2331,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
             renderProfiles(settings().selectedProfileId);
             return false;
         }
-        profile.secretId = targetSecretId;
+        setConnectionSecret(profile, connection.format, targetSecretId);
         profile.needsSecret = expectedSecret;
         if (expectedSecret) toastr.warning('原绑定密钥不存在，已改用安全空密钥；请重新绑定后再连接。');
     } else {
@@ -1917,7 +2354,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
     }
 
     try {
-        applyNativeFields(profile, '', applyModel);
+        applyNativeFields(connection, '', applyModel, modelOverride);
         if (extensionDisabled) throw new Error('Extension disabled while applying profile');
         clearCredentialSafetyBlock(config.secretKey);
         settings().activeProfileId = profile.id;
@@ -1944,9 +2381,12 @@ function captureNativeProfile(name, format, existing = {}, connection = {}) {
     const endpoint = connection.endpoint ?? nativeEndpoint(normalizedFormat);
     const proxyMode = usesProxyProfile(normalizedFormat, endpoint);
     const activeSecret = getActiveSecret(config.secretKey);
-    const retainedSecretId = existing.format === normalizedFormat ? String(existing.secretId || '') : '';
+    // A key belongs to its slot: a Profile moved to another slot keeps none
+    // rather than adopting the key another Profile left active there.
+    const sameSlot = !existing.format || FORMATS[existing.format]?.secretKey === config.secretKey;
+    const retainedSecretId = sameSlot ? String(existing.secretId || '') : '';
     // A draft only uses a key typed for it, never the slot's active key.
-    const secretId = proxyMode ? '' : (retainedSecretId || (existing.draft ? '' : activeSecret?.id) || '');
+    const secretId = proxyMode ? '' : (retainedSecretId || (existing.draft || !sameSlot ? '' : activeSecret?.id) || '');
     const needsSecret = !proxyMode && (!secretId || secretId === settings().emptySecretIds[config.secretKey]);
     const profileName = name || existing.name;
     const profileId = existing.id || makeId();
@@ -2397,25 +2837,45 @@ async function saveSelectedProfile() {
         toastr.error('无法读取权威密钥状态，已取消保存 API 配置。');
         return;
     }
-    const keyValue = keyEditorDirty ? normalizeText($('#quicker_api_key_input').val()) : '';
-    if (!keyValue && !isNew) adoptNativeActiveSecret(current);
+    const keyTyped = keyEditorDirty ? normalizeText($('#quicker_api_key_input').val()) : '';
+    if (!keyTyped && !isNew) adoptNativeActiveSecret(current);
+    // A protocol/URL change can move the credential to another key slot. Carry
+    // the Profile's own key there; never adopt whatever that slot holds now.
+    const slotChanged = !isNew && credentialSlot(current.format, current.endpoint) !== credentialSlot(format, editorUrl);
+    let keyValue = keyTyped;
+    if (!keyValue && slotChanged && profileHasCredential(current, current.format, current.endpoint)) {
+        const carried = await readProfileCredential(current);
+        if (!carried) {
+            toastr.warning('协议或 URL 变更后密钥需存入新位置，但原密钥明文不可读：请在 Key 输入框重新填写后保存。');
+            return;
+        }
+        keyValue = carried;
+    }
+    // Per-model formats in other key slots get their own copy of the key.
+    const extraCredentials = await provisionModelCredentials(current, format, editorUrl, keyValue);
+    if (!extraCredentials) return;
     let captureBase = current;
     if (keyValue) {
         const credentialDraft = normalizeProfile({ ...structuredClone(current), format });
-        if (!await saveAndBindInputKey(credentialDraft, format, editorUrl)) return;
+        if (!await saveAndBindInputKey(credentialDraft, format, editorUrl, keyValue)) return;
         captureBase = credentialDraft;
     }
     // Capture the editor without changing the live connection first: applyProfile
     // must snapshot the original source/fields for credential verification/rollback.
     const retainedProxy = proxyMode && captureBase.format === format
         && normalizeText(captureBase.endpoint) === editorUrl ? getBoundProxyPreset(captureBase) : null;
+    const ownProxyPassword = !isNew && proxyMode && usesProxyProfile(current.format, current.endpoint)
+        ? String(getBoundProxyPreset(current)?.password || '') : undefined;
+    const proxiesBefore = profileProxyNames(current);
     Object.assign(current, captureNativeProfile(current.name, format, captureBase, {
         endpoint: editorUrl,
         opencodeApiFormat: String($('#quicker_api_opencode_format').val() || ''),
-        // A draft never borrows the previous channel's proxy password.
-        proxyPassword: keyValue || retainedProxy?.password || (captureBase.draft ? '' : undefined),
+        // A draft or a Profile moved to another slot never borrows the live
+        // connection's proxy password.
+        proxyPassword: keyValue || retainedProxy?.password || ownProxyPassword || (captureBase.draft || slotChanged ? '' : undefined),
     }));
     delete current.draft;
+    current.extraCredentials = extraCredentials;
     if (hasManagedModels(format)) {
         // Favorites are explicit; only a brand-new profile starts with its model favorited.
         if (isNew) current.availableModels = normalizeModelList([...(current.availableModels || []), current.model]);
@@ -2427,6 +2887,7 @@ async function saveSelectedProfile() {
         }
     }
     if (!profiles().includes(current)) profiles().push(current);
+    releaseUnusedProxyPresets(proxiesBefore);
     settings().selectedProfileId = current.id;
     // Saving data is not proof that its source and credential are active.
     settings().activeProfileId = null;
@@ -2439,7 +2900,7 @@ async function saveSelectedProfile() {
     const presetName = currentPresetName();
     // A new channel is only applied; the current preset keeps its binding and
     // model until this channel is saved again or a native preset is saved.
-    if (applied && presetName && !isNew) {
+    if (applied && presetName && !isNew && presetLinkEnabled()) {
         settings().presetBindings[presetName] = current.id;
         settings().presetModels[presetName] = presetModelSnapshot(current, current.model);
     }
@@ -2482,15 +2943,7 @@ async function deleteSelectedProfile() {
     const content = $('<div>').append($('<p>').text(`删除 Profile“${profile.name}”？`), $('<p>').text('不会删除任何原生密钥；相关原生预设绑定会被解除。'));
     if (usedBy.length) content.append($('<p>').text(`便捷方案「${usedBy.join('、')}」使用了该配置，删除后会被标记为失效，需要重新选择配置。`));
     if (!await callQuickerPopup(content, POPUP_TYPE.CONFIRM)) return;
-    settings().profiles = profiles().filter(item => item.id !== profile.id);
-    for (const [name, id] of Object.entries(settings().presetBindings)) {
-        if (id === profile.id) {
-            delete settings().presetBindings[name];
-            delete settings().presetModels[name];
-        }
-    }
-    if (settings().activeProfileId === profile.id) settings().activeProfileId = null;
-    if (settings().selectedProfileId === profile.id) settings().selectedProfileId = null;
+    removeProfileData(profile);
     scheduleSettingsSave();
     renderProfiles();
 }
@@ -2525,7 +2978,7 @@ async function ensureSecret(key, value, label) {
     return { id: verified ? id : '', reused: false, exposureAvailable: match.exposureAvailable, exposureBlocked: match.exposureBlocked || '' };
 }
 
-async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat = profile?.format, endpointOverride = null) {
+async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat = profile?.format, endpointOverride = null, valueOverride = null) {
     if (!profile) {
         toastr.info('请先选择或新建配置。');
         return false;
@@ -2533,7 +2986,7 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
     const format = normalizeFormat(requestedFormat);
     const config = FORMATS[format];
     const endpoint = endpointOverride === null ? String(oai_settings[config.endpointField] || '') : String(endpointOverride || '');
-    const value = normalizeText($('#quicker_api_key_input').val() || $(config.keyInput).val());
+    const value = normalizeText(valueOverride ?? ($('#quicker_api_key_input').val() || $(config.keyInput).val()));
     if (usesProxyProfile(format, endpoint)) {
         if (!value) return true;
         profile.proxyPreset = ensureBoundProxyPreset(profile.name, endpoint, value, profile.proxyPreset, profile.id);
@@ -2633,12 +3086,42 @@ async function addCustomModel(initial = null) {
 }
 
 function favoriteAndUseModel(profile, model) {
-    profile.availableModels = normalizeModelList([...(profile.availableModels || []), model]);
+    setFavoriteModels(profile, [...(profile.availableModels || []), model]);
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
-    renderModelControl(profile, model);
-    syncEditorModelToNative();
+    return useProviderModel(profile, model);
+}
+
+// Choosing a model is choosing its provider. This is the single path that
+// writes a picked model into the host connection: the provider's own model
+// when it is live, otherwise the provider is applied together with the model.
+async function useProviderModel(profile, model) {
+    const value = normalizeText(model);
+    if (!profile || !value || platform.isModelAction(value)) return false;
+    const editing = profile === selectedProfile();
+    if (editing && getEditorModel() !== value) renderModelControl(profile, value);
+    if (editing && (profile.draft || editorConnectionDirty(profile))) {
+        // An unsaved connection is not live yet; the model waits for the save.
+        renderStatus();
+        return false;
+    }
+    if (editing && settings().activeProfileId === profile.id && profileMatchesNative(profile, { includeModel: false })
+        && liveFormat(profile) === effectiveFormat(profile, value)) {
+        syncEditorModelToNative();
+        // Switching the model of the live provider is not a Profile edit.
+        editorModelBaseline = value;
+        renderStatus();
+        return true;
+    }
+    if (profile.draft || !isFormatSupported(profile.format)) return false;
+    clearKeyEditor();
+    const applied = await applyProfileById(profile.id, quickActionTransaction, { model: value });
+    if (applied) {
+        editorModelBaseline = getEditorModel(profile.format);
+        recordPresetModel(profile, value);
+    }
     renderStatus();
+    return applied;
 }
 
 function modelIdsFromPayload(payload) {
@@ -2811,11 +3294,11 @@ async function fetchCustomModels() {
         profile.fetchedFromEndpoint = editorUrl;
         profile.updatedAt = new Date().toISOString();
         scheduleSettingsSave();
-        modelPickerView = 'all';
+        mainModelPicker.view = 'all';
         renderModelControl(profile, getEditorModel(profile.format) || profile.model);
         const stale = staleFavoriteModels(profile.availableModels, result.models);
         toastr.success(`通过${result.route}获取 ${result.models.length} 个模型，已切换到“全部”列表。`);
-        if (stale.length) toastr.warning(`${stale.length} 个收藏模型不在云端最新列表中，可在“管理模型列表”中一键清理。`);
+        if (stale.length) toastr.warning(`${stale.length} 个收藏模型不在云端最新列表中，可在“渠道管理”中一键清理。`);
         renderStatus();
     } catch (error) {
         console.error('[QuickerApi] Model fetch failed:', error);
@@ -2837,28 +3320,447 @@ function matchesModelSearch(model, query) {
     return true;
 }
 
-async function manageCustomModels() {
-    const profile = selectedProfile();
-    if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
-    if (profile.draft) return toastr.info('请先保存新配置，再管理模型列表。');
-    if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('Key 尚未保存，请先点击保存按钮再管理或获取模型。');
-    const endpoint = normalizeText($('#quicker_api_url').val());
-    if (endpoint !== normalizeText(profile.endpoint)) return toastr.info('URL 已变化，请先保存配置再管理模型。');
+// ---------------------------------------------------------------------------
+// Channel manager: providers (connection + model catalog) in one place.
+// Every edit is a draft; "保存" commits all channels, "取消" discards them.
+// ---------------------------------------------------------------------------
 
-    const draft = {
-        current: normalizeText(getEditorModel(profile.format) || profile.model),
+function channelDraftFrom(profile) {
+    return {
+        id: profile.id,
+        isNew: false,
+        deleted: false,
+        name: profile.name,
+        format: profile.format,
+        endpoint: profile.endpoint,
+        opencodeApiFormat: profile.opencodeApiFormat || 'openai_compat',
+        key: '',
         available: normalizeModelList(profile.availableModels),
-        fetched: profile.fetchedFromEndpoint === endpoint ? normalizeModelList(profile.fetchedModels) : [],
-        fetchedFromEndpoint: profile.fetchedFromEndpoint === endpoint ? endpoint : '',
+        fetched: profileFetchedModels(profile),
+        fetchedFromEndpoint: profileFetchedModels(profile).length ? normalizeText(profile.endpoint) : '',
+        formats: { ...(profile.modelFormats || {}) },
     };
-    const initialDraft = structuredClone(draft);
+}
 
+function newChannelDraft(name) {
+    const format = isFormatSupported('openai') ? 'openai' : Object.keys(FORMATS).find(isFormatSupported);
+    return {
+        id: makeId(), isNew: true, deleted: false, name, format, endpoint: format === 'opencode' ? 'zen' : '',
+        opencodeApiFormat: 'openai_compat', key: '', available: [], fetched: [], fetchedFromEndpoint: '', formats: {},
+    };
+}
+
+const channelCatalogBaselines = new WeakMap();
+
+function channelSnapshot(draft) {
+    return JSON.stringify({ ...draft, available: normalizeModelList(draft.available), formats: channelModelFormats(draft) });
+}
+
+// Only favorites keep an override, and only one that differs from the channel.
+function channelModelFormats(draft) {
+    const favorites = new Set(normalizeModelList(draft.available));
+    return normalizeModelFormats(Object.fromEntries(Object.entries(draft.formats || {}).filter(([model]) => favorites.has(model))), draft.format);
+}
+
+function channelConnectionChanged(draft, profile) {
+    if (draft.isNew || !profile) return true;
+    return draft.format !== profile.format
+        || normalizeText(draft.endpoint) !== normalizeText(profile.endpoint)
+        || (draft.format === 'opencode' && draft.opencodeApiFormat !== profile.opencodeApiFormat)
+        || Boolean(normalizeText(draft.key));
+}
+
+// Saves a provider's connection without applying it: credentials are written
+// into their key slots while every slot keeps its live key. A live provider is
+// re-applied by the caller.
+async function saveChannelConnection(profile, draft) {
+    const format = normalizeFormat(draft.format);
+    if (!isFormatSupported(format)) {
+        toastr.warning(`“${draft.name}”：当前宿主不支持该格式。`);
+        return false;
+    }
+    let endpoint = normalizeText(draft.endpoint).slice(0, 2048);
+    try {
+        if (format === 'opencode') endpoint = validateOpenCodeConnection(endpoint, draft.opencodeApiFormat);
+    } catch (error) {
+        toastr.warning(`“${draft.name}”：${error.message}`);
+        return false;
+    }
+    if (isCustomFormat(format) && !endpoint) {
+        toastr.warning(`“${draft.name}”：URL 不能为空。`);
+        return false;
+    }
+    const proxyMode = usesProxyProfile(format, endpoint);
+    if (!proxyMode && !await readAuthoritativeSecretState()) {
+        toastr.error('无法读取权威密钥状态，已取消保存渠道。');
+        return false;
+    }
+    const saved = !profile.draft && !draft.isNew;
+    const slotChanged = saved && credentialSlot(profile.format, profile.endpoint) !== credentialSlot(format, endpoint);
+    let keyValue = normalizeText(draft.key);
+    if (!keyValue && slotChanged && profileHasCredential(profile, profile.format, profile.endpoint)) {
+        const carried = await readProfileCredential(profile);
+        if (!carried) {
+            toastr.warning(`“${draft.name}”：协议或 URL 变更后密钥需存入新位置，但原密钥明文不可读：请在 API 密钥中重新填写后保存。`);
+            return false;
+        }
+        keyValue = carried;
+    }
+    const extraCredentials = await provisionModelCredentials({ ...profile, name: draft.name, modelFormats: channelModelFormats(draft) }, format, endpoint, keyValue);
+    if (!extraCredentials) return false;
+    let secretId = saved && !slotChanged ? profile.secretId : '';
+    let proxyPreset = '';
+    if (proxyMode) {
+        const password = keyValue || (saved && !slotChanged ? String(getBoundProxyPreset(profile)?.password || '') : '');
+        proxyPreset = ensureBoundProxyPreset(draft.name, endpoint, password, saved && !slotChanged ? profile.proxyPreset : '', profile.id);
+        secretId = '';
+    } else if (keyValue) {
+        secretId = await writeExtraSecret(FORMATS[format].secretKey, keyValue, draft.name);
+        if (!secretId) {
+            toastr.error(`“${draft.name}”：密钥保存或激活状态无法确认。`);
+            return false;
+        }
+    }
+    const endpointChanged = normalizeText(profile.endpoint) !== endpoint;
+    Object.assign(profile, normalizeProfile({
+        ...profile,
+        format,
+        endpoint,
+        opencodeApiFormat: format === 'opencode' ? draft.opencodeApiFormat : '',
+        includeBody: supportsCustomParameters(format) ? profile.includeBody : '',
+        includeHeaders: supportsCustomParameters(format) ? profile.includeHeaders : '',
+        secretId,
+        proxyPreset,
+        needsSecret: !proxyMode && (!secretId || secretId === settings().emptySecretIds[FORMATS[format].secretKey]),
+        extraCredentials,
+        fetchedModels: endpointChanged ? [] : profile.fetchedModels,
+        fetchedFromEndpoint: endpointChanged ? '' : profile.fetchedFromEndpoint,
+        draft: false,
+        updatedAt: new Date().toISOString(),
+    }));
+    delete profile.draft;
+    return true;
+}
+
+function removeProfileData(profile) {
+    settings().profiles = profiles().filter(item => item.id !== profile.id);
+    for (const [name, id] of Object.entries(settings().presetBindings)) {
+        if (id === profile.id) {
+            delete settings().presetBindings[name];
+            delete settings().presetModels[name];
+        }
+    }
+    if (settings().activeProfileId === profile.id) settings().activeProfileId = null;
+    if (settings().selectedProfileId === profile.id) settings().selectedProfileId = null;
+    releaseUnusedProxyPresets(profileProxyNames(profile));
+}
+
+async function manageChannels(initialId = settings().selectedProfileId) {
+    if (extensionDisabled || teardownPending) return;
+    const drafts = new Map(profiles().filter(profile => !profile.draft).map(profile => [profile.id, channelDraftFrom(profile)]));
+    // Unsaved panel drafts become new channels here.
+    for (const profile of profiles().filter(item => item.draft)) {
+        drafts.set(profile.id, { ...newChannelDraft(profile.name), id: profile.id, format: profile.format, endpoint: profile.endpoint, isNew: true, panelDraft: true });
+    }
+    const initial = new Map([...drafts].map(([id, draft]) => [id, channelSnapshot(draft)]));
+    let currentId = drafts.has(initialId) ? initialId : drafts.keys().next().value || null;
+    let catalog = null;
+
+    const content = $('<div class="quicker-api__channels" data-view="detail">');
+    const sidebar = $(`<aside class="quicker-api__channels-sidebar" aria-label="渠道列表">
+        <div class="quicker-api__channels-head">
+            <h3><i class="fa-solid fa-server"></i><span>渠道</span></h3>
+            <button type="button" class="menu_button quicker-api__channel-new" data-channel-action="new" title="新建渠道"><i class="fa-solid fa-plus"></i><span>新建</span></button>
+        </div>
+        <div class="quicker-api__channels-list" role="listbox" aria-label="渠道"></div>
+    </aside>`);
+    const detail = $('<section class="quicker-api__channel-detail">');
+    content.append(sidebar, detail);
+    const list = sidebar.find('.quicker-api__channels-list');
+
+    const isLive = id => settings().activeProfileId === id && Boolean(profiles().find(item => item.id === id && !item.draft && profileMatchesNative(item, { includeModel: false })));
+    const isDirty = draft => draft.isNew || draft.deleted || channelSnapshot(draft) !== initial.get(draft.id);
+
+    const renderSidebar = () => {
+        list.empty();
+        const visible = [...drafts.values()].filter(draft => !draft.deleted);
+        if (!visible.length) list.append($('<div class="quicker-api__empty-state">').text('还没有渠道'));
+        for (const draft of visible) {
+            const live = isLive(draft.id);
+            list.append($('<button type="button" class="quicker-api__channel-item" role="option">')
+                .attr({ 'data-channel-id': draft.id, 'aria-selected': String(draft.id === currentId) })
+                .toggleClass('is-active', draft.id === currentId)
+                .append(
+                    $('<span class="quicker-api__channel-avatar" aria-hidden="true">').text((draft.name || '?').slice(0, 1).toUpperCase()),
+                    $('<span class="quicker-api__channel-text">').append(
+                        $('<span class="quicker-api__channel-name">').text(draft.name || '未命名'),
+                        $('<small class="quicker-api__channel-format">').text(`${formatShortLabel(draft.format)} · ${normalizeModelList(draft.available).length} 个模型`),
+                    ),
+                    $('<span class="quicker-api__channel-flags">').append(
+                        live ? $('<i class="quicker-api__channel-live" title="生效中">') : null,
+                        isDirty(draft) ? $('<i class="quicker-api__channel-dirty" title="有未保存的修改">') : null,
+                    ),
+                ));
+        }
+    };
+
+    const refreshChrome = () => {
+        renderSidebar();
+        const draft = drafts.get(currentId);
+        if (!draft) return;
+        detail.find('.quicker-api__channel-title').text(draft.name || '未命名');
+    };
+
+    const renderDetail = () => {
+        detail.empty();
+        catalog = null;
+        const draft = drafts.get(currentId);
+        if (!draft || draft.deleted) {
+            detail.append($('<div class="quicker-api__channel-empty">').append(
+                $('<i class="fa-solid fa-server" aria-hidden="true">'),
+                $('<p>').text('选择左侧渠道进行编辑，或新建一个渠道。'),
+                $('<button type="button" class="menu_button" data-channel-action="new"><i class="fa-solid fa-plus"></i><span>新建渠道</span></button>'),
+            ));
+            return;
+        }
+        const profile = profiles().find(item => item.id === draft.id) || null;
+        const live = isLive(draft.id);
+        const header = $(`<header class="quicker-api__channel-header">
+            <button type="button" class="menu_button quicker-api__channel-back" data-channel-action="back" title="返回渠道列表" aria-label="返回渠道列表"><i class="fa-solid fa-chevron-left"></i></button>
+            <div class="quicker-api__channel-heading"><h3 class="quicker-api__channel-title"></h3></div>
+            <div class="quicker-api__channel-header-actions"></div>
+        </header>`);
+        header.find('.quicker-api__channel-heading').append(
+            live ? $('<span class="quicker-api__channel-badge is-live"><i class="fa-solid fa-circle"></i>生效中</span>') : null,
+        );
+        header.find('.quicker-api__channel-header-actions').append(
+            draft.isNew ? $('<span class="quicker-api__channel-badge">未保存</span>') : null,
+            $('<button type="button" class="menu_button quicker-api__channel-delete" data-channel-action="delete" title="删除渠道"><i class="fa-solid fa-trash"></i><span>删除</span></button>'),
+        );
+        header.find('.quicker-api__channel-title').text(draft.name || '未命名');
+
+        const formatSelect = $('<select class="text_pole" data-field="format">');
+        for (const [key, config] of Object.entries(FORMATS)) {
+            if (isFormatSupported(key) || key === draft.format) formatSelect.append($('<option>').val(key).text(config.label).prop('disabled', !isFormatSupported(key)));
+        }
+        formatSelect.val(draft.format);
+        const opencodeSelect = $('<select class="text_pole" data-field="opencodeApiFormat">');
+        for (const option of $('#quicker_api_opencode_format option').toArray()) opencodeSelect.append($('<option>').val(option.value).text(option.textContent));
+        if (!opencodeSelect.children().length) opencodeSelect.append($('<option>').val('openai_compat').text('OpenAI Chat'));
+        opencodeSelect.val(draft.opencodeApiFormat);
+        const keyInput = $('<input class="text_pole" type="password" autocomplete="new-password" spellcheck="false" data-field="key">').val(draft.key);
+        const field = (label, control, extraClass = '') => $(`<label class="quicker-api__channel-field ${extraClass}">`).append($('<span>').text(label), control);
+        const connection = $('<div class="quicker-api__channel-card" data-card="connection">').append(
+            $('<h4><i class="fa-solid fa-plug"></i><span>连接</span></h4>'),
+            $('<div class="quicker-api__channel-grid">').append(
+                field('名称', $('<input class="text_pole" type="text" maxlength="120" autocomplete="off" data-field="name">').val(draft.name)),
+                field('API 协议', formatSelect),
+                field('API 地址', $('<input class="text_pole" type="url" autocomplete="off" spellcheck="false" maxlength="2048" data-field="endpoint" placeholder="https://example.com/v1">').val(draft.endpoint), 'is-wide'),
+                field('OpenCode 协议', opencodeSelect, 'quicker-api__channel-opencode'),
+                field('API 密钥', $('<div class="quicker-api__channel-key">').append(
+                    keyInput,
+                    $('<button type="button" class="menu_button" data-channel-action="reveal" title="显示/隐藏输入的密钥" aria-label="显示/隐藏输入的密钥"><i class="fa-solid fa-eye"></i></button>'),
+                ), 'is-wide'),
+            ),
+            // Only what the key input's placeholder cannot say.
+            $('<small class="quicker-api__channel-hint" data-role="credential-hint" hidden>'),
+        );
+        const models = $('<div class="quicker-api__channel-card" data-card="models">');
+        detail.append(header, connection, models);
+        catalog = buildChannelCatalog(draft, profile, {
+            onChange: () => { refreshChrome(); renderCredentialHint(); },
+        });
+        models.append(catalog.element);
+
+        const renderCredentialHint = () => {
+            const slot = credentialSlot(draft.format, normalizeText(draft.endpoint));
+            const saved = profile && !profile.draft && !draft.isNew;
+            const hasOwn = saved && credentialSlot(profile.format, profile.endpoint) === slot && profileHasCredential(profile, profile.format, profile.endpoint);
+            const extraSlots = [...new Set(profileFormats({ format: draft.format, modelFormats: channelModelFormats(draft) })
+                .map(format => credentialSlot(format, normalizeText(draft.endpoint))).filter(item => item !== slot))];
+            const parts = [];
+            if (!normalizeText(draft.key) && !hasOwn && saved && profileHasCredential(profile, profile.format, profile.endpoint)) parts.push('协议或地址变更：保存时沿用原密钥（不可读时需重新填写）。');
+            if (extraSlots.length) parts.push(`部分模型的格式另需「${extraSlots.map(credentialSlotLabel).join('、')}」密钥，保存时会写入同一密钥。`);
+            connection.find('[data-role="credential-hint"]').text(parts.join(' ')).prop('hidden', !parts.length);
+            keyInput.attr('placeholder', hasOwn ? '留空使用已保存凭据' : (usesProxyProfile(draft.format, normalizeText(draft.endpoint)) ? '代理密码' : 'API Key'));
+            connection.find('.quicker-api__channel-opencode').prop('hidden', draft.format !== 'opencode');
+        };
+        renderCredentialHint();
+
+        connection.on('input change', '[data-field]', function () {
+            const name = this.dataset.field;
+            draft[name] = name === 'name' ? String(this.value).slice(0, 120) : String(this.value);
+            if (name === 'format') {
+                if (draft.format === 'opencode' && !normalizeText(draft.endpoint)) {
+                    draft.endpoint = 'zen';
+                    connection.find('[data-field="endpoint"]').val('zen');
+                }
+                catalog?.refreshFormats();
+            }
+            if (name === 'endpoint' || name === 'format' || name === 'opencodeApiFormat' || name === 'key') catalog?.refreshFetchState();
+            renderCredentialHint();
+            refreshChrome();
+        }).on('keydown', 'input', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                event.stopPropagation(); // Host Popup treats Enter as confirmation.
+            }
+        });
+    };
+
+    const selectChannel = id => {
+        currentId = id;
+        content.attr('data-view', 'detail');
+        renderSidebar();
+        renderDetail();
+    };
+
+    content.on('click', '[data-channel-id]', function () {
+        selectChannel(this.dataset.channelId);
+    });
+    content.on('click', '[data-channel-action]', async function () {
+        const action = this.dataset.channelAction;
+        if (action === 'back') return content.attr('data-view', 'list');
+        if (action === 'reveal') {
+            const input = detail.find('[data-field="key"]');
+            const show = input.attr('type') === 'password';
+            input.attr('type', show ? 'text' : 'password');
+            $(this).find('i').attr('class', show ? 'fa-solid fa-eye-slash' : 'fa-solid fa-eye');
+            return;
+        }
+        if (action === 'new') {
+            const used = new Set([...drafts.values()].filter(draft => !draft.deleted).map(draft => draft.name.toLocaleLowerCase()));
+            let index = drafts.size + 1;
+            while (used.has(`渠道 ${index}`.toLocaleLowerCase())) index++;
+            const draft = newChannelDraft(`渠道 ${index}`);
+            drafts.set(draft.id, draft);
+            selectChannel(draft.id);
+            detail.find('[data-field="name"]').trigger('focus').trigger('select');
+            return;
+        }
+        if (action === 'delete') {
+            const draft = drafts.get(currentId);
+            if (!draft) return;
+            if (draft.isNew && !draft.panelDraft) drafts.delete(draft.id);
+            else draft.deleted = true;
+            currentId = [...drafts.values()].find(item => !item.deleted)?.id || null;
+            content.attr('data-view', currentId ? 'detail' : 'list');
+            renderSidebar();
+            renderDetail();
+            toastr.info(`已标记删除“${draft.name}”，点击保存后生效。`);
+        }
+    });
+
+    renderSidebar();
+    renderDetail();
+
+    const commit = async () => {
+        const deleted = [...drafts.values()].filter(draft => draft.deleted);
+        const usedBy = deleted.flatMap(draft => settings().quickActions.filter(action => action.profileId === draft.id).map((action, index) => quickActionDisplayName(action, index)));
+        if (deleted.length) {
+            const message = $('<div>').append(
+                $('<p>').text(`删除渠道“${deleted.map(draft => draft.name).join('、')}”？`),
+                $('<p>').text('不会删除任何原生密钥；相关原生预设绑定会被解除。'),
+            );
+            if (usedBy.length) message.append($('<p>').text(`便捷方案「${usedBy.join('、')}」使用了这些渠道，删除后会被标记为失效。`));
+            if (!await callQuickerPopup(message, POPUP_TYPE.CONFIRM)) return false;
+        }
+        const names = new Map();
+        for (const draft of drafts.values()) {
+            if (draft.deleted) continue;
+            const name = sanitizeName(draft.name);
+            if (!name) {
+                selectChannel(draft.id);
+                toastr.warning('渠道名称不能为空。');
+                return false;
+            }
+            if (names.has(name.toLocaleLowerCase())) {
+                selectChannel(draft.id);
+                toastr.warning(`渠道名称“${name}”重复。`);
+                return false;
+            }
+            names.set(name.toLocaleLowerCase(), draft.id);
+            draft.name = name;
+        }
+        const liveBefore = profiles().find(item => item.id === settings().activeProfileId && isLive(item.id)) || null;
+        const liveFormatBefore = liveBefore ? liveFormat(liveBefore) : null;
+        const liveModel = liveFormatBefore ? nativeModelFor(liveFormatBefore) : '';
+        let reapply = false;
+        // Saving writes credentials into key slots: block generation and
+        // native key adoption for the whole commit.
+        const transitionWasBlocked = presetTransitionBlocked;
+        beginPresetTransition();
+        try {
+            for (const draft of deleted) {
+                const profile = profiles().find(item => item.id === draft.id);
+                if (profile) removeProfileData(profile);
+            }
+            for (const draft of drafts.values()) {
+                if (draft.deleted || !isDirty(draft)) continue;
+                let profile = profiles().find(item => item.id === draft.id);
+                if (!profile) profile = normalizeProfile({ id: draft.id, name: draft.name, format: draft.format, draft: true });
+                const proxiesBefore = profileProxyNames(profile);
+                if (channelConnectionChanged(draft, profile.draft ? null : profile)) {
+                    if (!await saveChannelConnection(profile, draft)) {
+                        selectChannel(draft.id);
+                        scheduleSettingsSave();
+                        return false;
+                    }
+                    if (!profiles().includes(profile)) profiles().push(profile);
+                    if (profile === liveBefore) reapply = true;
+                } else {
+                    const nextFormats = channelModelFormats(draft);
+                    const extra = await provisionModelCredentials({ ...profile, modelFormats: nextFormats }, profile.format, profile.endpoint, '');
+                    if (!extra) {
+                        selectChannel(draft.id);
+                        return false;
+                    }
+                    profile.extraCredentials = extra;
+                }
+                profile.name = uniqueName(draft.name, profile.id);
+                profile.modelFormats = channelModelFormats({ ...draft, format: profile.format });
+                setFavoriteModels(profile, draft.available);
+                releaseUnusedProxyPresets(proxiesBefore);
+                if (normalizeText(draft.fetchedFromEndpoint) === normalizeText(profile.endpoint) && draft.fetched.length) {
+                    profile.fetchedModels = normalizeModelList(draft.fetched);
+                    profile.fetchedFromEndpoint = profile.endpoint;
+                }
+                profile.updatedAt = new Date().toISOString();
+                draft.isNew = false;
+                delete draft.panelDraft;
+                initial.set(draft.id, channelSnapshot(draft));
+                if (profile === liveBefore && liveModel && effectiveFormat(profile, liveModel) !== liveFormatBefore) reapply = true;
+            }
+        } finally {
+            if (!transitionWasBlocked) endPresetTransition();
+        }
+        scheduleSettingsSave();
+        if (reapply && liveBefore && profiles().includes(liveBefore)) {
+            const applied = await applyProfileById(liveBefore.id, quickActionTransaction, { model: liveModel || liveBefore.model });
+            if (!applied) toastr.warning(`“${liveBefore.name}”已保存，但未能重新应用；请检查连接与密钥后重新选择。`);
+        }
+        renderProfiles(settings().selectedProfileId);
+        if (await persistSettingsNow()) toastr.success('渠道已保存。');
+        return true;
+    };
+
+    await callQuickerPopup(content, POPUP_TYPE.CONFIRM, '', {
+        wide: true,
+        okButton: '保存',
+        cancelButton: '取消',
+        animation: 'none',
+        onClosing: async popup => (popup.result ? await commit() : true),
+    });
+    catalog = null;
+}
+
+// The model catalog of one channel draft: favorites (with per-model formats,
+// order and editing) and the remote snapshot (fetch, search, bulk selection).
+function buildChannelCatalog(draft, profile, { onChange }) {
     const content = $('<div class="quicker-api__model-manager quicker-api__model-manager--paged">');
-    content.append($('<div class="quicker-api__manager-note">').text('所有修改仅在确认后保存，取消会完整回滚。'));
-    // Narrow screens show one panel at a time behind these tabs (no page scrolling needed).
-    const pageTabs = $(`<div class="quicker-api__manager-pages" role="tablist" aria-label="管理页面">
+    const pageTabs = $(`<div class="quicker-api__manager-pages" role="tablist" aria-label="模型目录">
+        <button type="button" role="tab" class="menu_button" data-page="chosen"><i class="fa-solid fa-star"></i><span>收藏目录</span><small></small></button>
         <button type="button" role="tab" class="menu_button" data-page="remote"><i class="fa-solid fa-cloud-arrow-down"></i><span>远端模型</span><small></small></button>
-        <button type="button" role="tab" class="menu_button" data-page="chosen"><i class="fa-solid fa-star"></i><span>收藏</span><small></small></button>
     </div>`);
     const columns = $('<div class="quicker-api__manager-columns">');
     const remotePanel = $('<section class="quicker-api__manager-panel" data-page="remote" role="tabpanel">');
@@ -2874,9 +3776,9 @@ async function manageCustomModels() {
     pageTabs.on('click', '[data-page]', function () {
         showPage(this.dataset.page);
     });
-    showPage('remote');
+    showPage('chosen');
     const remoteActions = $('<div class="quicker-api__manager-actions">').append(
-        $('<button type="button" class="menu_button" data-action="fetch"><i class="fa-solid fa-arrows-rotate"></i><span>获取</span></button>'),
+        $('<button type="button" class="menu_button" data-action="fetch"><i class="fa-solid fa-arrows-rotate"></i><span>获取可用模型</span></button>'),
         $('<button type="button" class="menu_button" data-action="all">全选</button>'),
         $('<button type="button" class="menu_button" data-action="invert">反选</button>'),
         $('<button type="button" class="menu_button" data-action="none">全不选</button>'),
@@ -2887,7 +3789,7 @@ async function manageCustomModels() {
         $('<button type="button" class="menu_button" data-action="add"><i class="fa-solid fa-plus"></i><span>新增</span></button>'),
         $('<button type="button" class="menu_button quicker-api__prune-stale" data-action="prune" title="移除云端最新列表中已不存在的收藏"><i class="fa-solid fa-broom"></i><span>清理失效</span></button>'),
         $('<button type="button" class="menu_button" data-action="clear">清空</button>'),
-        $('<button type="button" class="menu_button" data-action="reset">重置</button>'),
+        $('<button type="button" class="menu_button" data-action="reset" title="撤销本次对这个渠道收藏目录的所有修改（增删、排序、格式），回到打开渠道管理时的样子">撤销修改</button>'),
     );
     const remoteSearch = $('<div class="quicker-api__model-search">');
     const searchInput = $('<input class="text_pole" type="search" autocomplete="off" placeholder="搜索远端模型" aria-label="搜索远端模型">');
@@ -2895,16 +3797,21 @@ async function manageCustomModels() {
     const searchCount = $('<small class="quicker-api__model-search-count" role="status" aria-live="polite">');
     remoteSearch.append(searchInput, clearSearch);
     const searchHelp = $('<small class="quicker-api__model-search-help">').text('忽略大小写，支持部分名称或按顺序输入不连续字符；筛选时批量操作仅影响匹配项。');
+    const fetchHint = $('<small class="quicker-api__model-search-help quicker-api__fetch-hint">');
     const remoteList = $('<div class="quicker-api__model-list">');
     const chosenList = $('<div class="quicker-api__model-list">');
-    const chosenTitle = $('<h4><i class="fa-solid fa-star"></i> 收藏（下拉“收藏”列表）</h4>');
+    const chosenTitle = $('<h4><i class="fa-solid fa-star"></i> 收藏（模型下拉中的“收藏”列表）</h4>');
     const staleBadge = $('<span class="quicker-api__stale-badge" role="status" aria-live="polite">');
     chosenTitle.append(staleBadge);
-    remotePanel.append($('<h4><i class="fa-solid fa-cloud-arrow-down"></i> 远端模型（勾选 = 收藏）</h4>'), remoteActions, remoteSearch, searchHelp, searchCount, remoteList);
-    chosenPanel.append(chosenTitle, chosenActions, chosenList);
-    columns.append(remotePanel, chosenPanel);
+    const formatHelp = $('<small class="quicker-api__model-search-help">').text('每个模型可单独指定 API 协议；“跟随渠道”时使用渠道的协议。');
+    remotePanel.append($('<h4><i class="fa-solid fa-cloud-arrow-down"></i> 远端模型（勾选 = 收藏）</h4>'), remoteActions, fetchHint, remoteSearch, searchHelp, searchCount, remoteList);
+    chosenPanel.append(chosenTitle, chosenActions, formatHelp, chosenList);
+    columns.append(chosenPanel, remotePanel);
     content.append(pageTabs, columns);
 
+    // The catalog as it was when the manager opened, kept across channel switches.
+    if (!channelCatalogBaselines.has(draft)) channelCatalogBaselines.set(draft, structuredClone({ available: draft.available, fetched: draft.fetched, fetchedFromEndpoint: draft.fetchedFromEndpoint, formats: draft.formats }));
+    const initialCatalog = channelCatalogBaselines.get(draft);
     const normalizeDraft = () => {
         draft.available = normalizeModelList(draft.available);
     };
@@ -2963,6 +3870,17 @@ async function manageCustomModels() {
             : !draft.fetched.length ? '尚无当前 URL 的远端快照'
                 : '没有匹配的远端模型，请尝试其他关键词或清空搜索';
     };
+    // Fetching uses the saved connection and credential.
+    const fetchBlocker = () => {
+        if (!profile || profile.draft || draft.isNew) return '新渠道需先保存连接，才能获取可用模型。';
+        if (channelConnectionChanged(draft, profile)) return '连接有未保存的修改，保存后才能获取可用模型。';
+        return '';
+    };
+    const refreshFetchState = () => {
+        const blocker = fetchBlocker();
+        fetchHint.text(blocker).prop('hidden', !blocker);
+        remoteActions.find('[data-action="fetch"]').attr('title', blocker || '从当前渠道获取模型列表');
+    };
 
     const chosenButton = (op, icon, label) => {
         const button = document.createElement('button');
@@ -2976,10 +3894,26 @@ async function manageCustomModels() {
         button.append(glyph);
         return button;
     };
+    const fillFormatSelect = select => {
+        const choices = modelFormatChoices({ format: draft.format }).filter(format => format !== draft.format);
+        select.replaceChildren();
+        const follow = document.createElement('option');
+        follow.value = '';
+        follow.textContent = `跟随渠道（${formatShortLabel(draft.format)}）`;
+        select.append(follow);
+        for (const format of choices) {
+            const option = document.createElement('option');
+            option.value = format;
+            option.textContent = formatShortLabel(format);
+            select.append(option);
+        }
+        select.hidden = !choices.length;
+        select.dataset.channelFormat = draft.format;
+    };
     const chosenRows = new Map();
     const chosenEmpty = document.createElement('div');
     chosenEmpty.className = 'quicker-api__empty-state';
-    chosenEmpty.textContent = '收藏列表为空';
+    chosenEmpty.textContent = '收藏列表为空：在“远端模型”中勾选，或输入自定义模型 ID 新增';
     chosenList[0].append(chosenEmpty);
     const createChosenRow = model => {
         const row = document.createElement('div');
@@ -2993,13 +3927,17 @@ async function manageCustomModels() {
         input.value = model;
         input.setAttribute('aria-label', `模型 ${model}`);
         const label = document.createElement('small');
+        const format = document.createElement('select');
+        format.className = 'text_pole quicker-api__model-format-select';
+        format.setAttribute('aria-label', `${model} 的 API 协议`);
+        fillFormatSelect(format);
         const up = chosenButton('up', 'fa-arrow-up', '上移');
         const down = chosenButton('down', 'fa-arrow-down', '下移');
         const actions = document.createElement('div');
         actions.className = 'quicker-api__item-actions';
         actions.append(chosenButton('edit', 'fa-pen', '编辑'), chosenButton('remove', 'fa-trash', '删除'), up, down);
-        row.append(position, input, label, actions);
-        const entry = { row, position, input, label, up, down, index: -1, source: '' };
+        row.append(position, input, label, format, actions);
+        const entry = { row, position, input, label, format, up, down, index: -1, source: '' };
         chosenRows.set(model, entry);
         return entry;
     };
@@ -3035,6 +3973,10 @@ async function manageCustomModels() {
                 entry.input.readOnly = true;
                 entry.input.value = model;
             }
+            if (entry.format.dataset.channelFormat !== draft.format) fillFormatSelect(entry.format);
+            const override = draft.formats[model] && draft.formats[model] !== draft.format ? draft.formats[model] : '';
+            if (entry.format.value !== override) entry.format.value = [...entry.format.options].some(option => option.value === override) ? override : '';
+            entry.row.classList.toggle('has-format', Boolean(entry.format.value));
             if (entry.source !== source) {
                 entry.source = source;
                 entry.row.classList.toggle('is-stale', isStale);
@@ -3061,13 +4003,15 @@ async function manageCustomModels() {
         normalizeDraft();
         syncRemoteChecks();
         renderChosen();
+        onChange?.();
     };
-    const renderManager = () => {
+    const renderCatalog = () => {
         normalizeDraft();
         if (renderedFetched !== draft.fetched) buildRemoteRows();
         syncRemoteChecks();
         syncRemoteFilter();
         renderChosen();
+        refreshFetchState();
     };
 
     const toggleRemoteModel = (model, checked) => {
@@ -3092,7 +4036,10 @@ async function manageCustomModels() {
         const next = normalizeText(input.value);
         if (model === undefined || !next || (next !== model && draft.available.includes(next))) return renderChosen();
         draft.available[index] = next;
-        if (draft.current === model) draft.current = next;
+        if (next !== model && draft.formats[model]) {
+            draft.formats[next] = draft.formats[model];
+            delete draft.formats[model];
+        }
         updateDraft();
     };
     chosenList.on('click', '[data-op]', function () {
@@ -3107,11 +4054,21 @@ async function manageCustomModels() {
             input.select();
             return;
         }
-        if (op === 'remove') draft.available.splice(index, 1);
+        if (op === 'remove') {
+            delete draft.formats[draft.available[index]];
+            draft.available.splice(index, 1);
+        }
         const swap = op === 'up' ? index - 1 : op === 'down' ? index + 1 : -1;
         if (swap >= 0 && swap < draft.available.length) {
             [draft.available[swap], draft.available[index]] = [draft.available[index], draft.available[swap]];
         }
+        updateDraft();
+    }).on('change', '.quicker-api__model-format-select', function () {
+        const index = Number(this.closest('.quicker-api__chosen-model')?.dataset.index);
+        const model = draft.available[index];
+        if (model === undefined) return;
+        if (this.value) draft.formats[model] = this.value;
+        else delete draft.formats[model];
         updateDraft();
     }).on('keydown', '.quicker-api__chosen-model > input', function (event) {
         if (event.key === 'Enter') {
@@ -3127,18 +4084,22 @@ async function manageCustomModels() {
     remoteActions.on('click', 'button', async function () {
         const action = String($(this).data('action'));
         if (action === 'fetch') {
+            const blocker = fetchBlocker();
+            if (blocker) return toastr.info(blocker);
             const button = $(this).prop('disabled', true);
+            const endpoint = normalizeText(profile.endpoint);
             try {
                 const result = await fetchModelsForProfile(profile, endpoint);
                 draft.fetched = result.models;
                 draft.fetchedFromEndpoint = endpoint;
-                toastr.success(`通过${result.route}获取 ${result.models.length} 个模型；确认后保存快照。`);
+                toastr.success(`通过${result.route}获取 ${result.models.length} 个模型；点击保存后保存快照。`);
             } catch (error) {
-                console.error('[QuickerApi] Model manager fetch failed:', error);
+                console.error('[QuickerApi] Channel manager fetch failed:', error);
                 toastr.error(`获取模型失败：${error.message}`);
             } finally {
                 button.prop('disabled', false);
-                renderManager();
+                renderCatalog();
+                onChange?.();
             }
             return;
         }
@@ -3170,20 +4131,23 @@ async function manageCustomModels() {
             if (!stale.size) return;
             draft.available = draft.available.filter(model => !stale.has(model));
             updateDraft();
-            toastr.info(`已移除 ${stale.size} 个失效收藏；点击保存后生效。${stale.has(draft.current) ? '当前选中的模型不受影响，但它已不在云端列表中。' : ''}`);
+            toastr.info(`已移除 ${stale.size} 个失效收藏；点击保存后生效。`);
         }
         if (action === 'clear') {
             draft.available = [];
+            draft.formats = {};
             updateDraft();
         }
         if (action === 'reset') {
-            Object.assign(draft, structuredClone(initialDraft));
-            renderManager();
+            Object.assign(draft, structuredClone(initialCatalog));
+            renderCatalog();
+            onChange?.();
         }
     });
     customInput.on('keydown', event => {
         if (event.key === 'Enter') {
             event.preventDefault();
+            event.stopPropagation(); // Host Popup treats Enter as confirmation.
             addDraftModel();
         }
     });
@@ -3198,24 +4162,12 @@ async function manageCustomModels() {
         syncRemoteFilter();
         searchInput.trigger('focus');
     });
-    renderManager();
-
-    if (!await callQuickerPopup(content, POPUP_TYPE.CONFIRM, '', {
-        wide: true,
-        large: true,
-        okButton: '保存',
-        cancelButton: '取消',
-        animation: 'none',
-    })) return;
-    normalizeDraft();
-    profile.availableModels = draft.available;
-    profile.fetchedModels = draft.fetched;
-    profile.fetchedFromEndpoint = draft.fetchedFromEndpoint;
-    profile.updatedAt = new Date().toISOString();
-    scheduleSettingsSave();
-    renderModelControl(profile, draft.current);
-    syncEditorModelToNative();
-    renderStatus();
+    renderCatalog();
+    return {
+        element: content,
+        refreshFormats: renderChosen,
+        refreshFetchState,
+    };
 }
 
 function quickActionDisplayName(action, index = 0) {
@@ -3324,13 +4276,6 @@ function profileOptionsHtml(selected = '') {
     )].join('');
 }
 
-function modelSuggestionsForProfile(profileId = '') {
-    const profile = profiles().find(item => item.id === profileId) || null;
-    if (!profile) return [];
-    return normalizeModelList([profile.model, ...(profile.availableModels || []),
-        ...profileFetchedModels(profile, profile.endpoint), ...nativeProviderModels(profile.format)]);
-}
-
 function normalizeQuickActionPlacement(value, fallback = 'rightSendForm') {
     return ['leftSendForm', 'rightSendForm', 'qrButtons', 'disabled'].includes(value) ? value : fallback;
 }
@@ -3384,7 +4329,6 @@ async function manageQuickActions() {
     let selectedId = globalDraft[0]?.id || '';
     let detailDraft = selectedId ? structuredClone(globalDraft[0]) : null;
     let detailBaseline = detailDraft ? JSON.stringify(detailDraft) : '';
-    let detailCandidates = detailDraft ? modelSuggestionsForProfile(detailDraft.profileId) : [];
 
     const content = $('<div class="quicker-api__quick-manager">');
     const header = $('<header class="quicker-api__quick-header">');
@@ -3412,12 +4356,73 @@ async function manageQuickActions() {
         const action = globalDraft.find(item => item.id === selectedId) || null;
         detailDraft = action ? structuredClone(action) : null;
         detailBaseline = detailDraft ? JSON.stringify(detailDraft) : '';
-        detailCandidates = detailDraft ? modelSuggestionsForProfile(detailDraft.profileId) : [];
         render();
     };
+    // The scheme's model uses the same dropdown as the main panel: a chosen
+    // configuration opens on its favorites, no configuration on "格式".
+    const quickProfile = () => profiles().find(item => item.id === detailDraft?.profileId && !item.draft) || null;
+    const setQuickModel = model => {
+        if (!detailDraft) return;
+        detailDraft.model = normalizeText(model).slice(0, 500);
+        renderEditor();
+    };
+    const fetchQuickModels = async () => {
+        const profile = quickProfile();
+        if (!profile) return;
+        let fetchError = null;
+        const result = await enqueueOperation(async () => {
+            try {
+                return await fetchModelsForProfile(structuredClone(profile), normalizeText(profile.endpoint));
+            } catch (error) {
+                fetchError = error;
+                return null;
+            }
+        });
+        // The operation queue does not settle until fetchModelsForProfile's
+        // finally block has restored (or fail-closed) the Custom credential.
+        if (!managerOpen || extensionDisabled || teardownPending || !profiles().includes(profile)) return;
+        if (!result) {
+            if (fetchError) console.error('[QuickerApi] Quick action model fetch failed:', fetchError);
+            if (fetchError) toastr.error(`获取模型失败：${fetchError.message}`);
+            return;
+        }
+        profile.fetchedModels = result.models;
+        profile.fetchedFromEndpoint = normalizeText(profile.endpoint);
+        profile.updatedAt = new Date().toISOString();
+        scheduleSettingsSave();
+        quickModelPicker.view = 'all';
+        renderModelPickerOptions(quickModelPicker);
+        updateModelTrigger(quickModelPicker);
+        updateModelTrigger(mainModelPicker);
+        toastr.success(`通过${result.route}获取 ${result.models.length} 个模型。`);
+    };
+    const quickModelPicker = {
+        id: 'quicker_api_quick_model',
+        view: 'favorites',
+        emptyLabel: '— 不切换模型 —',
+        profile: quickProfile,
+        format: () => quickProfile()?.format || '',
+        current: () => normalizeText(detailDraft?.model),
+        // The dialog is in the top layer; the dropdown must live inside it.
+        portalParent: () => popup.dlg || content[0],
+        opening() { this.view = quickProfile() ? 'favorites' : 'formats'; },
+        isPicked: () => true,
+        canAdd: () => Boolean(detailDraft),
+        addLabel: model => `使用“${model}”`,
+        add: setQuickModel,
+        addAction: query => query ? setQuickModel(query) : toastr.info('请在搜索框输入模型 ID。'),
+        canFetch: data => Boolean(data.profile && hasManagedModels(data.profile.format) && normalizeText(data.profile.endpoint)),
+        fetch: () => void fetchQuickModels(),
+        pick(model, providerId) {
+            if (providerId && detailDraft) detailDraft.profileId = providerId;
+            setQuickModel(model);
+        },
+    };
+    modelPickerHosts.set(quickModelPicker.id, quickModelPicker);
     const field = (label, control) => $('<label class="quicker-api__quick-field">').append($('<span>').text(label), control);
     const updateDetailSaveState = () => editor.toggleClass('has-unsaved-detail', Boolean(detailDraft) && JSON.stringify(detailDraft) !== detailBaseline);
     const renderEditor = () => {
+        closeModelPicker({ host: quickModelPicker });
         editor.empty().removeClass('has-unsaved-detail');
         if (!detailDraft) {
             editor.append($('<div class="quicker-api__empty-state">').text('新增方案后，可自由组合 preset、Profile 与 model。'));
@@ -3426,67 +4431,14 @@ async function manageQuickActions() {
         const name = $('<input class="text_pole" type="text" maxlength="120" placeholder="留空自动命名为方案N">').val(detailDraft.name);
         const preset = $(`<select class="text_pole">${presetOptionsHtml(detailDraft.preset)}</select>`);
         const profileSelect = $(`<select class="text_pole">${profileOptionsHtml(detailDraft.profileId)}</select>`);
-        const modelInput = $('<input class="text_pole" type="text" maxlength="500" placeholder="可直接输入自定义模型 ID">').val(detailDraft.model);
-        const modelSelect = $('<select class="text_pole" aria-label="从配置模型列表选择"></select>');
-        const refreshModels = () => {
-            const models = normalizeModelList([...modelSuggestionsForProfile(detailDraft.profileId), ...detailCandidates, detailDraft.model]);
-            modelSelect.empty().append($('<option value="">— 从模型列表选择 —</option>'));
-            models.forEach(model => modelSelect.append($('<option>').val(model).text(model)));
-            modelSelect.val(models.includes(detailDraft.model) ? detailDraft.model : '');
-        };
-        refreshModels();
-        const fetchModels = $('<button type="button" class="menu_button" title="拉取所选 Profile 的模型"><i class="fa-solid fa-arrows-rotate"></i><span>拉取模型</span></button>');
-        const modelControl = $('<div class="quicker-api__quick-model-control">').append(modelInput, modelSelect, fetchModels);
-        const selectedProfileValue = () => profiles().find(item => item.id === detailDraft.profileId) || null;
-        fetchModels.prop('disabled', !hasManagedModels(selectedProfileValue()?.format));
+        const clearModel = $('<button type="button" class="menu_button" title="不切换模型" aria-label="清除模型"><i class="fa-solid fa-xmark"></i></button>')
+            .prop('disabled', !detailDraft.model)
+            .on('click', () => { detailDraft.model = ''; renderEditor(); });
+        const modelControl = $('<div class="quicker-api__quick-model-control">').append(buildModelPicker(quickModelPicker), clearModel);
         name.on('input', () => { detailDraft.name = sanitizeName(name.val()); updateDetailSaveState(); });
         preset.on('change', () => { detailDraft.preset = normalizeText(preset.val()); renderEditor(); });
         profileSelect.on('change', () => {
             detailDraft.profileId = normalizeText(profileSelect.val());
-            detailCandidates = modelSuggestionsForProfile(detailDraft.profileId);
-            renderEditor();
-        });
-        modelSelect.on('change', () => {
-            const selectedModel = normalizeText(modelSelect.val()).slice(0, 500);
-            if (!selectedModel) return;
-            detailDraft.model = selectedModel;
-            modelInput.val(selectedModel);
-            updateDetailSaveState();
-        });
-        modelInput.on('input', () => {
-            detailDraft.model = normalizeText(modelInput.val()).slice(0, 500);
-            const exists = modelSelect.find('option').filter((_, option) => option.value === detailDraft.model).length;
-            modelSelect.val(exists ? detailDraft.model : '');
-            updateDetailSaveState();
-        });
-        fetchModels.on('click', async () => {
-            const profile = selectedProfileValue();
-            if (!profile || !hasManagedModels(profile.format)) return toastr.info('请选择 API Profile 后拉取模型。');
-            const endpoint = normalizeText(profile.endpoint);
-            if (!endpoint) return toastr.warning('所选 Profile 没有可用的 Custom URL。');
-            fetchModels.prop('disabled', true);
-            let fetchError = null;
-            const result = await enqueueOperation(async () => {
-                try {
-                    return await fetchModelsForProfile(structuredClone(profile), endpoint);
-                } catch (error) {
-                    fetchError = error;
-                    return null;
-                }
-            });
-            // The operation queue does not settle until fetchModelsForProfile's
-            // finally block has restored (or fail-closed) the Custom credential.
-            // If the manager closed meanwhile, never write back into its draft.
-            if (!managerOpen || extensionDisabled || teardownPending) return;
-            if (!result) {
-                if (fetchError) console.error('[QuickerApi] Quick action model fetch failed:', fetchError);
-                if (fetchError) toastr.error(`获取模型失败：${fetchError.message}`);
-                if (detailDraft) renderEditor();
-                return;
-            }
-            if (!detailDraft || detailDraft.profileId !== profile.id) return;
-            detailCandidates = normalizeModelList([...detailCandidates, ...result.models]);
-            toastr.success(`通过${result.route}获取 ${result.models.length} 个模型；结果仅用于当前方案草稿。`);
             renderEditor();
         });
         const saveScheme = $('<button type="button" class="menu_button quicker-api__save-button"><i class="fa-solid fa-floppy-disk"></i><span>保存方案</span></button>');
@@ -3514,6 +4466,7 @@ async function manageQuickActions() {
             ),
             $('<div class="quicker-api__quick-editor-actions">').append(saveScheme, cancelScheme),
         );
+        updateModelTrigger(quickModelPicker);
         updateDetailSaveState();
     };
     const updateSaveState = () => saveAll.toggleClass('is-dirty', JSON.stringify(globalDraft) !== initialGlobalSnapshot);
@@ -3605,6 +4558,8 @@ async function manageQuickActions() {
         result = await popup.show();
     } finally {
         managerOpen = false;
+        closeModelPicker({ host: quickModelPicker });
+        modelPickerHosts.delete(quickModelPicker.id);
         ownedPopups.delete(popup);
     }
     if (!result || extensionDisabled || teardownPending) return;
@@ -3675,7 +4630,7 @@ async function selectPresetForQuickAction(name, token) {
     return await after;
 }
 
-async function applyProfileById(profileId, token = quickActionTransaction, { applyModel = true, manageTransition = true } = {}) {
+async function applyProfileById(profileId, token = quickActionTransaction, { applyModel = true, manageTransition = true, model = null } = {}) {
     const profile = profiles().find(item => item.id === profileId);
     if (!profile || token !== quickActionTransaction) return false;
     const generation = ++profileSelectionGeneration;
@@ -3686,7 +4641,7 @@ async function applyProfileById(profileId, token = quickActionTransaction, { app
     try {
         return await enqueueOperation(async () => {
             if (token !== quickActionTransaction || generation !== profileSelectionGeneration) return false;
-            return await applyProfile(profile, generation, true, applyModel);
+            return await applyProfile(profile, generation, true, applyModel, model);
         });
     } finally {
         if (manageTransition) endPresetTransition();
@@ -3712,14 +4667,16 @@ async function runQuickAction(action, token) {
         let profile = null;
         if (action.profileId) {
             profile = profiles().find(item => item.id === action.profileId) || null;
-            const applyModel = !action.preset && !action.model;
-            if (!profile || !await applyProfileById(action.profileId, token, { applyModel, manageTransition: false })) {
+            // A scheme model is applied together with its provider so its own
+            // per-model format and credential are used.
+            const options = action.model ? { model: action.model, manageTransition: false } : { applyModel: !action.preset, manageTransition: false };
+            if (!profile || !await applyProfileById(action.profileId, token, options)) {
                 if (token === quickActionTransaction) toastr.error('便捷方案的 Profile 未能安全应用。');
                 return;
             }
         }
         if (token !== quickActionTransaction) return;
-        if (action.model && !applyExplicitModel(action.model, profile?.format || '')) {
+        if (action.model && !profile && !applyExplicitModel(action.model, '')) {
             toastr.error('便捷方案模型写入验证失败。');
             return;
         }
@@ -3913,8 +4870,9 @@ function scheduleQuickActionEntries() {
     queueMicrotask(() => { quickActionRenderPending = false; ensureQuickActionEntries(); });
 }
 
-function handleNativePresetChangeBefore({ presetName, preset } = {}) {
+function handleNativePresetChangeBefore({ presetName, preset, settingsToUpdate } = {}) {
     if (extensionDisabled || settings().nativeUi) return;
+    if (!presetLinkEnabled()) return stripPresetConnection(preset, settingsToUpdate);
     beginPresetSwitch(preset);
     platform.rememberParameterEditors();
     const generation = ++profileSelectionGeneration;
@@ -3945,6 +4903,11 @@ async function handleNativePresetChange() {
 async function applyNativePresetChange() {
     if (extensionDisabled || settings().nativeUi) return false;
     platform.syncParameterEditors();
+    if (!presetLinkEnabled()) {
+        // The connection was stripped from the preset; only parameters changed.
+        renderStatus();
+        return false;
+    }
     beginPresetTransition();
     const generation = ++profileSelectionGeneration;
     const quickActionOwnsBlock = Boolean(quickActionBlockingToken);
@@ -4160,7 +5123,7 @@ function installPresetSaveObserver() {
 
 function captureNativePresetSave(event, type) {
     clearNativePresetSaveIntent();
-    if (extensionDisabled || teardownPending || settings().nativeUi) return;
+    if (extensionDisabled || teardownPending || settings().nativeUi || !presetLinkEnabled()) return;
     if (!SUPPORTED_SOURCES.has(oai_settings.chat_completion_source)) return;
     const profile = selectedProfile();
     const stop = message => {
@@ -4213,7 +5176,12 @@ function bindEvents() {
     installPresetSaveObserver();
     bindNativePresetSaveCapture();
     $('#quicker_api_toggle').on('click', togglePanel);
-    $('#quicker_api_mode').on('click', () => void setNativeUi(!settings().nativeUi));
+    $('#quicker_api_mode').on('change', function () {
+        const nativeUi = !this.checked;
+        // Show the real state until the switch is accepted (it may be refused while busy).
+        renderPanelMode();
+        void setNativeUi(nativeUi);
+    });
     window.addEventListener('pagehide', flushPanelState);
     window.addEventListener('beforeunload', warnBeforeLeaving);
     $('#quicker_api_profile_select').on('change', function () {
@@ -4226,7 +5194,7 @@ function bindEvents() {
         if (profile.draft) return renderProfiles(profile.id);
         // The current preset's binding remembers the model last used with it.
         const presetName = currentPresetName();
-        const bound = Boolean(presetName) && settings().presetBindings[presetName] === profile.id;
+        const bound = presetLinkEnabled() && Boolean(presetName) && settings().presetBindings[presetName] === profile.id;
         void applyProfileById(profile.id, quickActionTransaction, { applyModel: !bound, manageTransition: true }).then(applied => {
             if (applied && bound && settings().activeProfileId === profile.id && currentPresetName() === presetName) {
                 restoreBoundPresetModel(presetName, profile);
@@ -4237,18 +5205,24 @@ function bindEvents() {
         clearKeyEditor();
         const format = normalizeFormat($(this).val());
         if (retargetDraftFormat(format)) return;
-        const source = FORMATS[format].source;
-        platform.selectSource(source, FORMATS[format].apiFormat);
-        $('#quicker_api_url').val(nativeEndpoint(format));
-        const profile = selectedProfile()?.format === format ? selectedProfile() : null;
-        renderOpenCodeFields(profile, format);
-        renderModelControl(profile);
+        // The protocol belongs to the Profile draft: the host connection, URL and
+        // credential stay untouched until the Profile is saved and applied.
+        const profile = selectedProfile();
+        const model = normalizeText($('#quicker_api_custom_model').val());
+        renderOpenCodeFields(profile?.format === format ? profile : null, format);
+        renderModelControl(profile, model);
         updateCredentialEditor(profile);
         renderStatus();
     });
     $('#quicker_api_new').on('click', () => void createProfile());
     $('#quicker_api_quick_url').on('click', toggleQuickUrlMenu);
     $('#quicker_api_additional_parameters').on('click', () => $('#customize_additional_parameters').trigger('click'));
+    $('#quicker_api_preset_link').on('change', function () {
+        settings().presetLink = $(this).prop('checked') === true;
+        if (!settings().presetLink) clearNativePresetSaveIntent();
+        scheduleSettingsSave();
+        renderStatus();
+    });
     $('#quicker_api_save').on('click', () => void enqueueOperation(saveSelectedProfile));
     $('#quicker_api_rename').on('click', renameSelectedProfile);
     $('#quicker_api_copy').on('click', copySelectedProfile);
@@ -4274,14 +5248,14 @@ function bindEvents() {
     $('#quicker_api_key_input').on('input', () => { keyEditorDirty = true; renderStatus(); });
     $(document).on('input.quickerApi', '#custom_include_body, #custom_exclude_body, #custom_include_headers', renderStatus);
     $(document).on('change.quickerApi', '#quicker_api_custom_model, #quicker_api_provider_model', () => {
-        syncEditorModelToNative();
+        void useProviderModel(selectedProfile(), getEditorModel());
         updateModelTrigger();
         renderStatus();
     });
     bindModelPickerEvents();
     $(document).on('click.quickerApi', '#quicker_api_add_model', addCustomModel);
     $(document).on('click.quickerApi', '#quicker_api_fetch_models', () => void enqueueOperation(fetchCustomModels));
-    $(document).on('click.quickerApi', '#quicker_api_manage_models', manageCustomModels);
+    $(document).on('click.quickerApi', '#quicker_api_channels', () => void manageChannels());
     $(document).on('click.quickerApi', '.quicker-api__manage-actions', () => void manageQuickActions());
     $('#custom_model_id').on('input.quickerApi', handleNativeModelChange);
     $('#model_claude_select, #model_google_select, #model_opencode_select').on('change.quickerApi', handleNativeModelChange);
@@ -4291,13 +5265,8 @@ function bindEvents() {
         updatePanelVisibility();
         // Preset-driven source changes are reconciled by the AFTER handler.
         if (presetTransitionBlocked) return;
-        if (selectedProfile()?.draft) return renderStatus();
-        const entry = Object.entries(FORMATS).find(([format]) => isFormatSupported(format) && matchesFormat(format));
-        if (!entry) return;
-        $('#quicker_api_format').val(entry[0]);
-        const profile = selectedProfile()?.format === entry[0] ? selectedProfile() : null;
-        renderProfileEditor(profile);
-        updateCredentialEditor(profile);
+        // The host's source only reports whether the selected Profile is live;
+        // it never rewrites the Profile editor.
         renderStatus();
     });
     $(document).on('click.quickerApi', '.secretKeyManager button, .secretKeyManager .menu_button', () => setTimeout(renderStatus, 250));
@@ -4346,9 +5315,9 @@ function renderPanelMode() {
     const nativeUi = settings().nativeUi;
     $('#quicker_api').toggleClass('is-native-ui', nativeUi);
     $('#quicker_api_mode')
-        .attr('aria-checked', String(!nativeUi))
-        .attr('title', nativeUi ? '开启后切回 Quicker Api 界面' : '关闭后切回 SillyTavern 原生界面')
-        .find('i').attr('class', `fa-solid ${nativeUi ? 'fa-toggle-off' : 'fa-toggle-on'}`);
+        .prop('checked', !nativeUi)
+        .closest('label').attr('title', nativeUi ? '开启后切回 Quicker Api 界面' : '关闭后切回 SillyTavern 原生界面');
+    $('#quicker_api_preset_link').prop('checked', presetLinkEnabled());
 }
 
 // Native UI hands the connection to the host's own controls. Switching back
@@ -4370,7 +5339,7 @@ async function setNativeUi(nativeUi) {
 
 async function restoreInitialProfileSelection() {
     const currentPreset = currentPresetName();
-    const boundId = currentPreset ? settings().presetBindings[currentPreset] : '';
+    const boundId = currentPreset && presetLinkEnabled() ? settings().presetBindings[currentPreset] : '';
     let target = profiles().find(profile => profile.id === boundId) || null;
     if (!target) target = profiles().find(profile => profile.id === settings().selectedProfileId) || null;
     if (!target) target = profiles().find(profile => profile.id === settings().activeProfileId) || null;
@@ -4439,7 +5408,8 @@ async function teardownQuickerApi() {
     clearKeyEditor();
     $('#quicker_api').remove();
     unbindModelPickerPosition();
-    $('#quicker_api_model_portal').remove();
+    openModelPickerHost = null;
+    $('.quicker-api__model-portal').remove();
     nativeProviderEditors().removeClass('quicker-api__native-provider');
     $(document).off('.quickerApi').off('.quickerApiMenu');
     $(window).off('.quickerApiMenu');

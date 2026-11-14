@@ -1,3 +1,45 @@
-# Keep regression sources versioned alongside the compatibility layer.
-# Only optional local test artifacts should stay out of the published extension.
+# 插件运行只需要：manifest.json、index.js、platform.js、style.css、README.md、LICENSE。
+# tests/ 下的回归测试源码（*.mjs / host-fixture.js）照常提交；
+# 本机实测脚本、截图、报告和运行时产物一律不上传。
+
+# 本机实测脚本、截图与报告
 /tests/artifacts/
+/tests/live*/
+/test-results/
+/playwright-report/
+/coverage/
+/.nyc_output/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.log
+*.pid
+*.trace
+*.har
+
+# 依赖与构建产物（插件本身无需构建）
+node_modules/
+dist/
+build/
+out/
+.cache/
+*.tgz
+
+# 本机运行时与密钥
+.env
+.env.*
+*.local
+*.secret
+tauritavern-runtime.json
+secrets.json
+
+# 系统与编辑器文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
