@@ -240,6 +240,20 @@ async function runChannelRegressions({ run, state, settle, log }) {
     // The quick-action manager uses the same dropdown: favorites of a chosen
     // configuration by default, "格式" without one; "全部" is only one
     // configuration's manually fetched list; tabs share one row.
+    // Opening the manager on saved schemes shows nothing to save: neither save
+    // button is green until a draft really changes (the switch counts as one).
+    await run(`settings().quickActions = [normalizeQuickAction({id:'qa-saved',name:'S',profileId:'prov-d',model:'d-chat',followChannel:false})]; window.quickTask = manageQuickActions(); true`);
+    await waitFor('ownedPopups.size === 1', 'quick manager did not open');
+    const greenish = 'el => { const n = getComputedStyle(el).color.match(/[\\d.]+/g).map(Number); const k = n.slice(0, 3).every(v => v <= 1) ? 255 : 1; const [r, g, b] = n.slice(0, 3).map(v => v * k); return g > r + 40 && g > b + 40; }';
+    const clean = await run(`(() => { const green = ${greenish}; const all = document.querySelector('.quicker-api__quick-header .quicker-api__save-button'); const scheme = document.querySelector('.quicker-api__quick-editor-actions .quicker-api__save-button');
+        return [all.classList.contains('is-dirty'), $('.quicker-api__quick-editor').hasClass('has-unsaved-detail'), green(all), green(scheme), $('#quicker_api_quick_follow_channel').prop('checked')]; })()`);
+    assert.deepEqual(clean, [false, false, false, false, false]);
+    const dirty = await run(`(() => { const green = ${greenish}; $('#quicker_api_quick_follow_channel').prop('checked', true).trigger('change');
+        return [$('.quicker-api__quick-editor').hasClass('has-unsaved-detail'), green(document.querySelector('.quicker-api__quick-editor-actions .quicker-api__save-button'))]; })()`);
+    assert.deepEqual(dirty, [true, true]);
+    await run('[...ownedPopups][0].completeCancelled(); quickTask');
+    log('the quick-action manager opens with no pending changes: save buttons only turn green when a draft differs');
+
     await run(`settings().quickActions = []; window.quickTask = manageQuickActions(); true`);
     await waitFor('ownedPopups.size === 1', 'quick manager did not open');
     await run(`$('.quicker-api__quick-list-toolbar button').first().trigger('click'); true`);
@@ -255,9 +269,25 @@ async function runChannelRegressions({ run, state, settle, log }) {
     assert.deepEqual(await run(`[$('#quicker_api_quick_model_dropdown [data-model-view].is-active').attr('data-model-view'), $('#quicker_api_quick_model_dropdown .quicker-api__model-option[data-model="d-chat"]:not([data-profile-id])').length]`), ['favorites', 1]);
     await run(`$('#quicker_api_quick_model_dropdown [data-model-view="all"]').trigger('click'); true`);
     assert.deepEqual(await run(`[pendingOperations, $('#quicker_api_quick_model_dropdown [data-model-picker-action="fetch"]').prop('disabled')]`), [0, false], 'opening 全部 never fetches by itself');
+    await run(`closeModelPicker(); $('#quicker_api_quick_follow_channel').prop('checked', false).trigger('change'); $('#quicker_api_quick_model_trigger').trigger('click');
+        $('#quicker_api_quick_model_dropdown [data-model-view="formats"]').trigger('click'); activateModelPickerOption($('#quicker_api_quick_model_dropdown .quicker-api__model-option[data-profile-id="prov-b"][data-model="gemini-b"]')[0]); true`);
+    assert.deepEqual(await run(`[$('.quicker-api__quick-editor select').eq(1).val(), $('#quicker_api_quick_model_trigger .quicker-api__model-trigger-label').text(), $('#quicker_api_quick_follow_channel').prop('checked')]`), ['prov-d', 'gemini-b', false]);
+    // The switch belongs to each scheme: a new scheme starts on, the first keeps off.
+    await run(`$('.quicker-api__quick-editor-actions .quicker-api__save-button').trigger('click'); $('.quicker-api__quick-list-toolbar button').first().trigger('click'); true`);
+    assert.equal(await run(`$('#quicker_api_quick_follow_channel').prop('checked')`), true);
+    await run(`$('.quicker-api__quick-item').first().trigger('click'); true`);
+    assert.equal(await run(`$('#quicker_api_quick_follow_channel').prop('checked')`), false);
+    assert.deepEqual(await run(`[normalizeQuickAction({}).followChannel, normalizeQuickAction({followChannel:false}).followChannel]`), [true, false]);
+    // The switch sits on the "模型" title row, and turns green when on.
+    const switchLook = await run(`(() => { const label = document.querySelector('label[for="quicker_api_quick_follow_channel"]'); const head = label.closest('.quicker-api__quick-field-head');
+        const title = head?.querySelector(':scope > span'); const track = () => { const el = label.querySelector('.quicker-api__switch-track'); el.style.transition = 'none'; const n = getComputedStyle(el).backgroundColor.match(/[\\d.]+/g).map(Number); const k = n.slice(0, 3).every(v => v <= 1) ? 255 : 1; return n.slice(0, 3).map(v => Math.round(v * k)).join(','); };
+        const off = track(); const input = document.getElementById('quicker_api_quick_follow_channel'); input.checked = true; const on = track(); input.checked = false;
+        const a = title.getBoundingClientRect(), b = label.getBoundingClientRect();
+        return [title.textContent, Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2) < 6, on !== off, (([r, g, b]) => g > r + 40 && g > b + 40)(on.split(',').map(Number)), getComputedStyle(document.body).getPropertyValue('--quicker-api-success').trim() !== '']; })()`);
+    assert.deepEqual(switchLook, ['\u6a21\u578b', true, true, true, true], JSON.stringify(switchLook));
     await run('[...ownedPopups][0].completeCancelled(); quickTask');
     assert.deepEqual(await run(`[modelPickerHosts.has('quicker_api_quick_model'), $('#quicker_api_quick_model_portal').length, settings().quickActions.length]`), [false, 0, 0]);
-    log('the quick-action manager reuses the model dropdown: configuration favorites by default, otherwise 格式; 全部 is never auto-fetched');
+    log('the quick-action manager reuses the model dropdown: configuration favorites by default, otherwise 格式; 全部 is never auto-fetched; the follow-channel switch decides whether the configuration changes too');
 
     const toggle = await run(`(() => { const input = document.getElementById('quicker_api_preset_link'); const before = input.checked; document.querySelector('.quicker-api__preset-link').click(); return [input.getAttribute('role'), before, input.checked, settings().presetLink]; })()`);
     assert.deepEqual(toggle, ['switch', false, true, true]);

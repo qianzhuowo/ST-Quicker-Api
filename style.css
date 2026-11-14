@@ -1,6 +1,10 @@
-.quicker-api {
+/* Shared by the panel, its popups and portaled dropdowns. */
+:root {
     --quicker-api-success: color-mix(in srgb, #35d06f 72%, var(--SmartThemeBodyColor));
     --quicker-api-danger: color-mix(in srgb, #ff4f5e 76%, var(--SmartThemeBodyColor));
+}
+
+.quicker-api {
     margin: 0.65rem 0 0.8rem;
     padding: 0.75rem;
     border: 1px solid var(--SmartThemeBorderColor);
@@ -1149,9 +1153,18 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
     transition: none !important;
 }
 
-.quicker-api__quick-header .quicker-api__save-button.is-dirty {
-    border-color: color-mix(in srgb, lightgreen 78%, var(--SmartThemeBorderColor));
-    background: color-mix(in srgb, lightgreen 10%, transparent);
+/* In the quick-action manager green means "there is something to save":
+   both save buttons stay neutral until their draft differs. */
+.quicker-api__quick-manager .quicker-api__save-button {
+    color: var(--SmartThemeBodyColor);
+    border-color: var(--SmartThemeBorderColor);
+}
+
+.quicker-api__quick-header .quicker-api__save-button.is-dirty,
+.quicker-api__quick-editor.has-unsaved-detail .quicker-api__quick-editor-actions .quicker-api__save-button {
+    color: var(--quicker-api-success);
+    border-color: color-mix(in srgb, var(--quicker-api-success) 78%, var(--SmartThemeBorderColor));
+    background: color-mix(in srgb, var(--quicker-api-success) 10%, transparent);
 }
 
 .quicker-api__quick-columns {
@@ -1289,10 +1302,6 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
     border-top: 1px solid var(--SmartThemeBorderColor);
 }
 
-.quicker-api__quick-editor.has-unsaved-detail .quicker-api__quick-editor-actions .quicker-api__save-button {
-    border-color: color-mix(in srgb, lightgreen 78%, var(--SmartThemeBorderColor));
-    background: color-mix(in srgb, lightgreen 10%, transparent);
-}
 
 .quicker-api__quick-field {
     display: grid;
@@ -1327,6 +1336,18 @@ dialog.popup:has(.quicker-api__quick-manager) .popup-controls {
 .quicker-api__quick-model-control > .menu_button {
     margin: 0;
     white-space: nowrap;
+}
+
+.quicker-api__quick-field-head {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.quicker-api__quick-field-head > span {
+    font-weight: 600;
 }
 
 dialog.popup:has(.quicker-api__placement-popup) {

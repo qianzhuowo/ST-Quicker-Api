@@ -425,6 +425,9 @@ function normalizeQuickAction(raw, index = 0) {
         preset: normalizeText(raw?.preset).slice(0, 500),
         profileId: normalizeText(raw?.profileId),
         model: normalizeText(raw?.model).slice(0, 500),
+        // Editing aid kept per scheme: picking another channel's model also
+        // makes that channel the scheme's configuration.
+        followChannel: raw?.followChannel !== false,
         params: normalizeQuickActionParameters(raw?.params),
         sequence: Number.isFinite(Number(raw?.sequence)) ? Number(raw.sequence) : index,
     };
@@ -4414,7 +4417,7 @@ async function manageQuickActions() {
         canFetch: data => Boolean(data.profile && hasManagedModels(data.profile.format) && normalizeText(data.profile.endpoint)),
         fetch: () => void fetchQuickModels(),
         pick(model, providerId) {
-            if (providerId && detailDraft) detailDraft.profileId = providerId;
+            if (providerId && detailDraft?.followChannel) detailDraft.profileId = providerId;
             setQuickModel(model);
         },
     };
@@ -4435,6 +4438,20 @@ async function manageQuickActions() {
             .prop('disabled', !detailDraft.model)
             .on('click', () => { detailDraft.model = ''; renderEditor(); });
         const modelControl = $('<div class="quicker-api__quick-model-control">').append(buildModelPicker(quickModelPicker), clearModel);
+        const followSwitch = $(`<label class="quicker-api__switch" for="quicker_api_quick_follow_channel" title="开：从其他渠道或“格式”里选模型，会把“配置”一起改成该渠道。关：只写模型名，“配置”保持你自己选的（可为空，运行时作用于当时正在使用的连接）。">
+                <input id="quicker_api_quick_follow_channel" class="quicker-api__switch-input" type="checkbox" role="switch" />
+                <span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>
+                <span class="quicker-api__switch-label">连同渠道一起切换</span>
+            </label>`);
+        // A div, not a <label>: the title row holds the switch's own label.
+        const modelField = $('<div class="quicker-api__quick-field">').append(
+            $('<div class="quicker-api__quick-field-head">').append($('<span>').text('模型'), followSwitch),
+            modelControl,
+        );
+        followSwitch.find('input').prop('checked', detailDraft.followChannel).on('change', function () {
+            detailDraft.followChannel = this.checked;
+            updateDetailSaveState();
+        });
         name.on('input', () => { detailDraft.name = sanitizeName(name.val()); updateDetailSaveState(); });
         preset.on('change', () => { detailDraft.preset = normalizeText(preset.val()); renderEditor(); });
         profileSelect.on('change', () => {
@@ -4461,7 +4478,7 @@ async function manageQuickActions() {
         editor.append(
             $('<h4 class="quicker-api__quick-editor-title">').text('方案详情'),
             $('<div class="quicker-api__quick-editor-fields">').append(
-                field('名称', name), field('预设', preset), field('配置', profileSelect), field('模型', modelControl),
+                field('名称', name), field('预设', preset), field('配置', profileSelect), modelField,
                 quickActionParametersEditor(detailDraft, updateDetailSaveState),
             ),
             $('<div class="quicker-api__quick-editor-actions">').append(saveScheme, cancelScheme),
