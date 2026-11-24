@@ -4037,7 +4037,8 @@ function matchesModelSearch(model, query) {
 // The key settings of a saved channel as the channel manager edits them: the
 // saved keys of its own slot (secret ids), the ones switched off, the key used
 // without rotation (a saved key or a new row), whether and how several keys
-// rotate, and the rows of keys that are not saved yet.
+// rotate, the new values given to saved keys (by secret id), and the rows of
+// keys that are not saved yet.
 function channelKeyDraft(profile) {
     const keys = profile ? connectionStoredKeys(profile) : [];
     const rotation = normalizeKeyRotation(profile?.keyRotation);
@@ -4047,8 +4048,14 @@ function channelKeyDraft(profile) {
         keyPrimary: keys.includes(profile?.secretId) ? profile.secretId : (keys[0] || ''),
         keyRotate: keys.length > 1 && rotation !== 'off',
         keyStrategy: rotation === 'off' ? 'sequential' : rotation,
+        keyEdits: {},
         keyRows: [],
     };
+}
+
+// The saved keys of a draft that were given a new value: secret id -> value.
+function channelKeyEdits(draft) {
+    return new Map(Object.entries(draft.keyEdits || {}).map(([id, value]) => [id, normalizeText(value)]).filter(([, value]) => value));
 }
 
 let channelKeyRowCount = 0;
@@ -4143,6 +4150,7 @@ function channelConnectionChanged(draft, profile) {
         || normalizeText(draft.endpoint) !== normalizeText(profile.endpoint)
         || (draft.format === 'opencode' && draft.opencodeApiFormat !== profile.opencodeApiFormat)
         || Boolean(normalizeText(draft.key))
+        || channelKeyEdits(draft).size > 0
         || channelKeyState(draft) !== channelKeyState(channelKeyDraft(profile));
 }
 
@@ -4189,7 +4197,10 @@ async function saveChannelConnection(profile, draft) {
         }
         keyValue = carried;
     }
-    const extraCredentials = await provisionModelCredentials({ ...profile, name: draft.name, modelFormats: channelModelFormats(draft) }, format, endpoint, keyValue);
+    // Saved keys given a new value are replaced where they stand; they exist only while the channel stays in its key slot.
+    const edits = saved && !slotChanged && !proxyMode ? channelKeyEdits(draft) : new Map();
+    // The other key slots of the channel follow a new key, and a new value of the channel's own key.
+    const extraCredentials = await provisionModelCredentials({ ...profile, name: draft.name, modelFormats: channelModelFormats(draft) }, format, endpoint, keyValue || edits.get(profile.secretId) || '');
     if (!extraCredentials) return false;
     let secretId = saved && !slotChanged ? profile.secretId : '';
     let keyPool = [];
@@ -4205,27 +4216,37 @@ async function saveChannelConnection(profile, draft) {
         // the ones the draft still lists.
         const had = saved && !slotChanged ? connectionStoredKeys(profile) : [];
         const kept = (draft.keys || []).filter(id => had.includes(id));
+        // A key carried over from another slot has no row.
+        const rows = typedRows.length ? typedRows : keyValue ? [{ ref: '', value: keyValue, off: false }] : [];
+        const numbered = kept.length + rows.length > 1;
+        const write = async (value, position) => {
+            const id = await writeExtraSecret(FORMATS[format].secretKey, value, numbered ? `${draft.name} · ${position + 1}` : draft.name);
+            if (!id) toastr.error(`“${draft.name}”：密钥保存或激活状态无法确认。`);
+            return id;
+        };
+        // The new value of a saved key takes its place, its switch and its selection; the old key stays in the host's key store.
+        const replaced = new Map(); // saved id -> the id of its new value
+        for (const [position, id] of kept.entries()) {
+            if (!edits.has(id)) continue;
+            const next = await write(edits.get(id), position);
+            if (!next) return false;
+            replaced.set(id, next);
+        }
+        const current = id => replaced.get(id) || id;
+        const keptNow = [...new Set(kept.map(current))];
         const typed = [];
         const written = new Map(); // row ref -> secret id
-        if (keyValue) {
-            // A key carried over from another slot has no row.
-            const rows = typedRows.length ? typedRows : [{ ref: '', value: keyValue, off: false }];
-            const numbered = kept.length + rows.length > 1;
-            for (const [position, row] of rows.entries()) {
-                const id = await writeExtraSecret(FORMATS[format].secretKey, row.value, numbered ? `${draft.name} · ${kept.length + position + 1}` : draft.name);
-                if (!id) {
-                    toastr.error(`“${draft.name}”：密钥保存或激活状态无法确认。`);
-                    return false;
-                }
-                written.set(row.ref, id);
-                if (!typed.includes(id)) typed.push(id);
-            }
+        for (const [position, row] of rows.entries()) {
+            const id = await write(row.value, kept.length + position);
+            if (!id) return false;
+            written.set(row.ref, id);
+            if (!typed.includes(id)) typed.push(id);
         }
-        const all = [...kept, ...typed.filter(id => !kept.includes(id))].slice(0, KEY_POOL_LIMIT);
+        const all = [...keptNow, ...typed.filter(id => !keptNow.includes(id))].slice(0, KEY_POOL_LIMIT);
         // A new key keeps the state of its row; a saved key entered again as an enabled row is switched on again.
         const typedOn = typedRows.filter(row => !row.off).map(row => written.get(row.ref));
         const switchedOff = new Set([
-            ...(draft.keyDisabled || []).filter(id => kept.includes(id)),
+            ...(draft.keyDisabled || []).filter(id => kept.includes(id)).map(current),
             ...typedRows.filter(row => row.off).map(row => written.get(row.ref)),
         ].filter(id => id && !typedOn.includes(id)));
         let own = '';
@@ -4235,11 +4256,11 @@ async function saveChannelConnection(profile, draft) {
                 toastr.warning(`“${draft.name}”：启用轮询时至少要启用一把密钥。`);
                 return false;
             }
-            own = enabled.includes(secretId) ? secretId : enabled[0];
+            own = enabled.includes(current(secretId)) ? current(secretId) : enabled[0];
         } else {
             // Without rotation the channel uses one key: the selected one, else the first.
             const ref = channelPrimaryRef(draft, [...kept, ...typedRows.map(row => row.ref)]);
-            own = (kept.includes(ref) ? ref : written.get(ref)) || all[0] || '';
+            own = (kept.includes(ref) ? current(ref) : written.get(ref)) || all[0] || '';
             switchedOff.delete(own);
         }
         // A channel that never had a key keeps what it was bound to; removing every saved key unbinds it.
@@ -4385,13 +4406,27 @@ async function manageChannels(initialId = settings().selectedProfileId) {
         const keyCount = $('<span class="quicker-api__channel-badge quicker-api__channel-key-count" data-role="key-count" title="启用 / 全部" hidden>');
         const keyAction = (action, icon, title, text = '') => $('<button type="button" class="menu_button">').attr({ 'data-key-action': action, title, 'aria-label': title })
             .append($('<i>').addClass(`fa-solid ${icon}`), text ? $('<span>').text(text) : null);
+        // Copying, removing repeats and clearing sit behind "更多操作".
+        const menuItem = (action, icon, text, title) => $('<button type="button" class="quicker-api__channel-key-menu-item" role="menuitem">').attr({ 'data-key-action': action, title })
+            .append($('<i>').addClass(`fa-solid fa-fw ${icon}`), $('<span>').text(text));
+        const keyMenu = $('<div class="quicker-api__channel-key-menu" data-role="key-menu" role="menu" aria-label="更多操作" hidden>').append(
+            menuItem('copy', 'fa-copy', '复制全部', '复制全部密钥'),
+            menuItem('dedupe', 'fa-filter', '去重复', '移除重复的密钥，每把只保留最前面的一行'),
+            menuItem('clear', 'fa-eraser', '清空', '清空此渠道的全部密钥（密钥仍保留在酒馆的密钥管理中）').addClass('is-danger'),
+        );
+        const keyMoreButton = keyAction('more', 'fa-ellipsis', '更多操作').attr({ 'aria-haspopup': 'menu', 'aria-expanded': 'false' });
+        const keyMore = $('<div class="quicker-api__channel-key-more" data-role="key-more">').append(keyMoreButton, keyMenu);
         const keyActions = $('<div class="quicker-api__channel-key-actions">').append(
             keyAction('add', 'fa-plus', '添加一把密钥', '添加'),
             keyAction('paste', 'fa-paste', '批量粘贴多把密钥', '批量'),
             keyAction('reveal', 'fa-eye', '显示/隐藏密钥'),
-            keyAction('copy', 'fa-copy', '复制全部密钥'),
-            keyAction('clear', 'fa-eraser', '清空此渠道的全部密钥（密钥仍保留在酒馆的密钥管理中）'),
+            keyMore,
         );
+        const setKeyMenu = (open, focusFirst = false) => {
+            keyMenu.prop('hidden', !open);
+            keyMoreButton.attr('aria-expanded', String(open));
+            if (open && focusFirst) keyMenu.children(':not(:disabled)').first().trigger('focus');
+        };
         const pastePanel = $('<div class="quicker-api__channel-key-paste" data-role="key-paste" hidden>').append(
             $('<textarea class="text_pole quicker-api__channel-key-paste-input quicker-api__secret-masked" rows="4" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="批量粘贴密钥" placeholder="每行一把，也可用空格、逗号或分号分隔；重复的会自动跳过">'),
             $('<div class="quicker-api__channel-key-paste-foot">').append(
@@ -4408,11 +4443,10 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             if (value === 'failover' && platform.isTauriHost && draft.keyStrategy !== 'failover') continue;
             strategySelect.append($('<option>').val(value).text(config.label).attr('title', config.hint));
         }
-        // "轮询 ON/OFF" and, next to it, how the keys rotate.
+        // "轮询 ON/OFF" and, on the same line, how the keys rotate. It sits above the list, so a long list does not push it away.
         const rotation = $('<div class="quicker-api__channel-rotation" data-role="key-rotation" hidden>').append(
             $('<label class="quicker-api__switch quicker-api__rotation-switch" title="开启后在已启用的密钥之间轮换；关闭则只使用选中的那一把">').append(
                 $('<input class="quicker-api__switch-input" type="checkbox" role="switch" aria-label="轮询" data-key-rotate>'),
-                $('<span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>'),
                 $('<span class="quicker-api__switch-label">').text('轮询'),
                 $('<span class="quicker-api__switch-state" data-role="key-rotate-state" aria-hidden="true">').text('OFF'),
             ),
@@ -4429,9 +4463,9 @@ async function manageChannels(initialId = settings().selectedProfileId) {
                 // Not a <label>: it holds several controls.
                 $('<div class="quicker-api__channel-field is-wide" data-role="key-field">').append(
                     $('<div class="quicker-api__channel-key-head">').append($('<span>').text('API 密钥'), keyCount, keyActions),
-                    keyList,
-                    pastePanel,
                     rotation,
+                    pastePanel,
+                    keyList,
                 ),
             ),
             // What the key list itself cannot say.
@@ -4450,9 +4484,12 @@ async function manageChannels(initialId = settings().selectedProfileId) {
         const sameSlot = () => Boolean(profile) && credentialSlot(profile.format, profile.endpoint) === credentialSlot(draft.format, normalizeText(draft.endpoint));
         const shownKeys = () => (savedKeyCount && !isProxy() && sameSlot() ? draft.keys || [] : []);
         const enabledKeyCount = () => shownKeys().filter(id => !draft.keyDisabled.includes(id)).length + channelTypedRows(draft).filter(row => !row.off).length;
-        // Plain values of saved keys, read only when asked to show or copy them.
+        // Plain values of saved keys, read only when asked to show, copy, compare or edit them.
         const plainKeys = new Map();
         let revealed = false;
+        // The saved key whose row is being typed into, and whether the host has refused to hand out a key.
+        let editingId = '';
+        let plainUnreadable = false;
         const readSavedKeys = async () => {
             const slot = FORMATS[draft.format]?.secretKey;
             // One at a time: a host that does not allow reading keys is asked only once.
@@ -4464,11 +4501,10 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             return true;
         };
 
-        // Number, key, the "current" badge, the switch of the key and its removal.
+        // Number, key, the switch of the key and its removal. The key in use has a green left edge.
         const makeKeyRow = () => $('<div class="quicker-api__channel-key-row">').append(
             $('<span class="quicker-api__channel-key-index">'),
             $('<input class="text_pole quicker-api__channel-key-input" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">'),
-            $('<span class="quicker-api__channel-badge is-live" title="酒馆当前正在使用的密钥" hidden><i class="fa-solid fa-circle"></i>当前</span>'),
             $('<label class="quicker-api__switch is-bare">').append(
                 $('<input class="quicker-api__switch-input" type="checkbox">'),
                 $('<span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>'),
@@ -4503,6 +4539,7 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             // Rows are rebuilt only when the list itself changes, so typing keeps its focus.
             const current = keyList.children().toArray();
             if (current.length !== items.length || current.some((element, index) => element.dataset.keyRef !== items[index].ref)) {
+                editingId = '';
                 keyList.empty();
                 items.forEach(() => keyList.append(makeKeyRow()));
             }
@@ -4514,18 +4551,29 @@ async function manageChannels(initialId = settings().selectedProfileId) {
                 const usable = Boolean(item.id) || typedRefs.includes(item.ref);
                 const repeated = !usable && Boolean(normalizeText(item.row.value));
                 const selected = usable && (single ? item.ref === draft.keyPrimary : item.id ? !draft.keyDisabled.includes(item.id) : !item.row.off);
-                const row = $(element).attr({ 'data-key-ref': item.ref, 'data-key-id': item.id || null }).toggleClass('is-off', usable && !selected).toggleClass('is-new', !item.id);
-                row.children('.quicker-api__channel-key-index').text(index + 1).attr('title', item.id ? (normalizeText(item.entry?.label) ? `已保存，在酒馆密钥管理中名为“${normalizeText(item.entry.label)}”` : '已保存的密钥') : '尚未保存');
+                // A saved key shows its mask; clicked, it is typed over, and the new value replaces it on save.
+                const edit = item.id ? draft.keyEdits[item.id] : undefined;
+                const editing = Boolean(item.id) && editingId === item.id;
+                // The key in use: the selected one without rotation, else the one the tavern is using right now.
+                const inUse = total > 1 && usable && (single ? item.ref === draft.keyPrimary : Boolean(item.id) && item.id === liveKey);
+                const row = $(element).attr({ 'data-key-ref': item.ref, 'data-key-id': item.id || null })
+                    .toggleClass('is-off', usable && !selected).toggleClass('is-new', !item.id).toggleClass('is-edited', edit !== undefined).toggleClass('is-live', inUse);
+                const origin = !item.id ? '尚未保存' : edit !== undefined ? '已修改，保存时替换原密钥' : normalizeText(item.entry?.label) ? `已保存，在酒馆密钥管理中名为“${normalizeText(item.entry.label)}”` : '已保存的密钥';
+                row.children('.quicker-api__channel-key-index').text(index + 1).attr('title', inUse ? `${single ? '正在使用的密钥' : '酒馆当前正在使用的密钥'} · ${origin}` : origin);
                 const input = row.children('.quicker-api__channel-key-input');
-                const value = item.id ? ((revealed && plainKeys.get(item.id)) || keyPreview(item.entry?.value) || '*'.repeat(10)) : item.row.value;
-                if (input.val() !== value) input.val(value);
-                input.prop('readOnly', Boolean(item.id)).toggleClass('quicker-api__secret-masked', !item.id && !revealed).attr({
+                // The row being typed into keeps what it holds.
+                if (!editing) {
+                    const value = item.id ? (edit ?? ((revealed && plainKeys.get(item.id)) || keyPreview(item.entry?.value) || '*'.repeat(10))) : item.row.value;
+                    if (input.val() !== value) input.val(value);
+                }
+                const editable = !item.id || editing || edit !== undefined;
+                input.prop('readOnly', !editable).toggleClass('quicker-api__secret-masked', editable && !revealed).attr({
                     'data-key-value': item.id ? null : item.ref,
-                    placeholder: item.id ? null : placeholder,
+                    'data-key-saved': item.id || null,
+                    placeholder: item.id ? '输入新密钥以替换，留空则不变' : placeholder,
                     'aria-label': `密钥 ${index + 1}`,
-                    title: repeated ? '与前面的密钥重复，保存时会忽略' : null,
+                    title: repeated ? '与前面的密钥重复，保存时会忽略' : !item.id ? null : edit !== undefined ? '已修改，保存时替换原密钥' : '点击可修改这把密钥',
                 });
-                row.children('.quicker-api__channel-badge').prop('hidden', !item.id || item.id !== liveKey);
                 const label = single ? '使用这把密钥' : '参与轮询';
                 const toggle = row.find('.quicker-api__switch-input')[0];
                 toggle.checked = false;
@@ -4545,8 +4593,10 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             keyCount.text(`${enabled}/${total}`).prop('hidden', proxyMode || total < 2);
             const full = total >= KEY_POOL_LIMIT;
             keyActions.find('[data-key-action="add"], [data-key-action="paste"]').prop('hidden', proxyMode).prop('disabled', full);
-            keyActions.find('[data-key-action="copy"]').prop('hidden', proxyMode).prop('disabled', !total);
-            keyActions.find('[data-key-action="clear"]').prop('hidden', proxyMode).prop('disabled', !total);
+            keyMore.prop('hidden', proxyMode);
+            if (proxyMode) setKeyMenu(false);
+            keyMenu.find('[data-key-action="copy"], [data-key-action="clear"]').prop('disabled', !total);
+            keyMenu.find('[data-key-action="dedupe"]').prop('disabled', total < 2);
             keyActions.find('[data-key-action="reveal"]').attr('aria-pressed', String(revealed)).children('i').attr('class', revealed ? 'fa-solid fa-eye-slash' : 'fa-solid fa-eye');
             pasteInput.toggleClass('quicker-api__secret-masked', !revealed);
             if (proxyMode) pastePanel.prop('hidden', true);
@@ -4568,6 +4618,10 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             const skipped = all.length - fresh.length;
             pasteCount.text(all.length ? `识别到 ${all.length} 把${skipped ? `，跳过 ${skipped} 把（重复或超出上限）` : ''}` : '');
             pastePanel.find('[data-key-action="paste-add"]').prop('disabled', !fresh.length).children('span').text(fresh.length ? `添加 ${fresh.length} 把` : '添加');
+            // The box is as tall as its text, up to its maximum height; long keys wrap.
+            const box = pasteInput[0];
+            box.style.height = 'auto';
+            box.style.height = `${box.scrollHeight + box.offsetHeight - box.clientHeight}px`;
         };
 
         const renderCredentialHint = () => {
@@ -4584,6 +4638,8 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             const parts = [];
             if (!typed.length && !hasOwn && saved && profileHasCredential(profile, profile.format, profile.endpoint)) parts.push('协议或地址变更：保存时沿用原密钥（不可读时需重新填写）。');
             if (extraSlots.length) parts.push(`部分模型的格式另需「${extraSlots.map(credentialSlotLabel).join('、')}」密钥，保存时会写入同一密钥。`);
+            const edited = proxyMode ? 0 : shown.filter(id => channelKeyEdits(draft).has(id)).length;
+            if (edited) parts.push(`保存时替换 ${edited} 把已修改的密钥（原密钥仍保留在酒馆的密钥管理中）。`);
             if (typed.length > 1 && proxyMode) {
                 parts.push('当前协议填写了自定义地址时使用反代密码，暂不支持密钥池：请只填写一把密钥。');
             } else if (!proxyMode && total > 1) {
@@ -4625,9 +4681,89 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             pastePanel.prop('hidden', true);
         };
 
-        connection.on('click', '[data-key-action]', async function () {
+        // A saved key is edited where it stands: its row empties (or shows the key, when the host allows
+        // reading it) and what is typed there replaces the key when the channel is saved.
+        const beginKeyEdit = async input => {
+            const id = input.dataset.keySaved;
+            if (!id || editingId === id) return;
+            editingId = id;
+            if (draft.keyEdits[id] !== undefined) return;
+            input.readOnly = false;
+            input.value = plainKeys.get(id) || '';
+            input.classList.toggle('quicker-api__secret-masked', !revealed);
+            if (plainKeys.has(id) || plainUnreadable) return;
+            const value = await findSecretBounded(FORMATS[draft.format]?.secretKey, id);
+            if (value === null) {
+                plainUnreadable = true;
+                return;
+            }
+            plainKeys.set(id, String(value));
+            if (editingId !== id || !input.isConnected || input.value || draft.keyEdits[id] !== undefined) return;
+            input.value = String(value);
+            if (document.activeElement === input) input.select();
+        };
+        // Removes the keys that repeat an earlier one. Saved keys are compared only when the host allows reading them.
+        const removeRepeatedKeys = async () => {
+            const shown = shownKeys();
+            const readable = !shown.length || await readSavedKeys();
+            if (!connection[0].isConnected) return;
+            const edits = channelKeyEdits(draft);
+            const first = new Map(); // value -> the ref that keeps it
+            const dropped = new Map(); // removed ref -> the ref that keeps its value
+            for (const id of shown) {
+                const value = edits.get(id) || (readable ? normalizeText(plainKeys.get(id)) : '');
+                if (!value) continue;
+                if (first.has(value)) dropped.set(id, first.get(value)); else first.set(value, id);
+            }
+            for (const row of draft.keyRows) {
+                const value = normalizeText(row.value);
+                if (!value) continue;
+                if (first.has(value)) dropped.set(row.ref, first.get(value)); else first.set(value, row.ref);
+            }
+            const unread = !readable && shown.some(id => !edits.has(id));
+            const note = unread ? `已保存的密钥无法读取，未参与比对。${keyExposureGuidance().warning}` : '';
+            if (!dropped.size) return unread ? toastr.warning(`新添加的密钥中没有重复。${note}`) : toastr.info('没有重复的密钥。');
+            // The key that stays takes over the selection of the one removed.
+            if (dropped.has(draft.keyPrimary)) draft.keyPrimary = dropped.get(draft.keyPrimary);
+            draft.keys = draft.keys.filter(id => !dropped.has(id));
+            draft.keyDisabled = draft.keyDisabled.filter(id => !dropped.has(id));
+            for (const ref of dropped.keys()) delete draft.keyEdits[ref];
+            draft.keyRows = draft.keyRows.filter(row => !dropped.has(row.ref));
+            keysChanged();
+            if (unread) toastr.warning(`已移除 ${dropped.size} 把重复的密钥。${note}`); else toastr.success(`已移除 ${dropped.size} 把重复的密钥。`);
+        };
+
+        // The menu closes when anything outside it is pressed or focus leaves it.
+        detail.off('pointerdown.quickerApiKeyMenu').on('pointerdown.quickerApiKeyMenu', event => {
+            if (!keyMenu.prop('hidden') && !keyMore[0].contains(event.target)) setKeyMenu(false);
+        });
+        keyMore.on('focusout', event => {
+            if (!keyMore[0].contains(event.relatedTarget)) setKeyMenu(false);
+        }).on('keydown', event => {
+            const open = !keyMenu.prop('hidden');
+            if (event.key === 'Escape' && open) {
+                // Escape closes the menu, not the channel manager.
+                event.preventDefault();
+                event.stopPropagation();
+                setKeyMenu(false);
+                keyMoreButton.trigger('focus');
+            } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault();
+                if (!open) setKeyMenu(true);
+                const items = keyMenu.children(':not(:disabled)').toArray();
+                const at = items.indexOf(document.activeElement);
+                const down = event.key === 'ArrowDown';
+                items[at < 0 ? (down ? 0 : items.length - 1) : (at + (down ? 1 : items.length - 1)) % items.length]?.focus();
+            }
+        });
+
+        connection.on('click', '[data-key-action]', async function (event) {
             const action = this.dataset.keyAction;
+            // Opened from the keyboard, the menu takes the focus.
+            if (action === 'more') return setKeyMenu(keyMenu.prop('hidden'), event.originalEvent?.detail === 0);
+            if (keyMenu[0].contains(this)) setKeyMenu(false);
             if (action === 'add') return addKeyRow();
+            if (action === 'dedupe') return removeRepeatedKeys();
             if (action === 'paste') return isProxy() ? undefined : pastePanel.prop('hidden') ? openPaste() : closePaste();
             if (action === 'paste-cancel') return closePaste();
             if (action === 'paste-add') {
@@ -4641,6 +4777,7 @@ async function manageChannels(initialId = settings().selectedProfileId) {
                 const shown = shownKeys();
                 draft.keys = draft.keys.filter(id => !shown.includes(id));
                 draft.keyDisabled = draft.keyDisabled.filter(id => !shown.includes(id));
+                draft.keyEdits = {};
                 draft.keyRows = [];
                 closePaste();
                 return keysChanged();
@@ -4649,17 +4786,36 @@ async function manageChannels(initialId = settings().selectedProfileId) {
                 // Keys not saved yet are shown either way; saved ones need the host to allow reading them.
                 if (!revealed && !await readSavedKeys()) {
                     toastr.warning(keyExposureGuidance().warning);
-                    if (!draft.keyRows.some(row => normalizeText(row.value))) return;
+                    if (!draft.keyRows.some(row => normalizeText(row.value)) && !channelKeyEdits(draft).size) return;
                 }
                 if (!connection[0].isConnected) return;
                 revealed = !revealed;
                 return renderKeys();
             }
             if (action === 'copy') {
-                if (!await readSavedKeys()) return toastr.warning(keyExposureGuidance().warning);
-                const values = [...new Set([...shownKeys().map(id => plainKeys.get(id)), ...channelTypedRows(draft).map(row => row.value)].filter(Boolean))];
+                // A saved key that was given a new value is copied as that value.
+                const edits = channelKeyEdits(draft);
+                if (shownKeys().some(id => !edits.has(id)) && !await readSavedKeys()) return toastr.warning(keyExposureGuidance().warning);
+                const values = [...new Set([...shownKeys().map(id => edits.get(id) || plainKeys.get(id)), ...channelTypedRows(draft).map(row => row.value)].filter(Boolean))];
                 if (values.length) await copyToClipboard(values.join('\n'), `已复制 ${values.length} 把密钥。`);
             }
+        }).on('pointerdown', '[data-key-saved]', function () {
+            // Editable before it takes the focus, so that a touch keyboard opens.
+            this.readOnly = false;
+        }).on('focusin', '[data-key-saved]', function () {
+            beginKeyEdit(this);
+        }).on('input', '[data-key-saved]', function () {
+            const id = this.dataset.keySaved;
+            const value = normalizeText(this.value);
+            // Typing the key back, or emptying the row, leaves the saved key as it is.
+            if (value && value !== plainKeys.get(id)) draft.keyEdits[id] = String(this.value); else delete draft.keyEdits[id];
+            keysChanged();
+        }).on('keydown', '[data-key-saved]', function (event) {
+            if (event.key === 'Enter' && !event.originalEvent?.isComposing) this.blur();
+        }).on('focusout', '[data-key-saved]', function () {
+            if (editingId !== this.dataset.keySaved) return;
+            editingId = '';
+            renderKeys();
         }).on('input', '[data-key-value]', function () {
             const row = draft.keyRows.find(item => item.ref === this.dataset.keyValue);
             if (!row) return;
@@ -4695,6 +4851,7 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             draft.keyRows = draft.keyRows.filter(item => item.ref !== ref);
             draft.keys = draft.keys.filter(item => item !== ref);
             draft.keyDisabled = draft.keyDisabled.filter(item => item !== ref);
+            delete draft.keyEdits[ref];
             keysChanged();
         }).on('change', '[data-key-rotate]', function () {
             channelRotationTouched.add(draft);

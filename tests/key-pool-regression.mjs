@@ -244,6 +244,9 @@ export async function runKeyPoolRegressions({ page, state, log }) {
         [true, true, '1', true, 0]);
     // Bulk paste: any of newline, space, comma or semicolon separates keys; repeats are skipped.
     await keyAction('paste');
+    // The paste box never scrolls sideways (the placeholder and long keys wrap) and grows with its text.
+    assert.deepEqual(await run(`(() => { const box = $('${detail} .quicker-api__channel-key-paste-input')[0]; const empty = [box.scrollWidth <= box.clientWidth, box.scrollHeight <= box.clientHeight]; const before = box.offsetHeight;
+        $(box).val(Array(9).fill('sk-' + 'x'.repeat(300)).join('\\n')).trigger('input'); return [...empty, box.scrollWidth <= box.clientWidth, box.offsetHeight > before]; })()`), [true, true, true, true]);
     await run(`$('${detail} .quicker-api__channel-key-paste-input').val('sk-1\\nsk-2, sk-2;sk-3\\n\\n sk-3 ').trigger('input'); true`);
     assert.deepEqual(await run(`[$('${detail} [data-role="key-paste"]').prop('hidden'), $('${detail} [data-role="paste-count"]').text(), $('${detail} [data-key-action="paste-add"] span').text(), $('${detail} [data-key-action="paste-add"]').prop('disabled')]`),
         [false, '识别到 5 把，跳过 2 把（重复或超出上限）', '添加 3 把', false]);
@@ -369,13 +372,125 @@ export async function runKeyPoolRegressions({ page, state, log }) {
     assert.deepEqual([saved[0].length, saved[0][0], saved[1], saved[2], saved[3], saved[5]], [3, bound, [saved[0][2]], null, bound, saved[0].slice(0, 2)]);
     log('channel manager: the last enabled key of a rotating channel cannot be switched off; clearing unbinds the channel and a new key binds it again; a new key switched off is saved switched off');
 
+    // 10. The key field: the title row with the actions, the rotation line ("轮询 ON/OFF" without a track,
+    //     the strategy next to it), the paste box, then the list. The key in use has a green left edge.
+    const [, extraOn, extraOff] = saved[0];
+    const liveRows = () => run(`$('${detail} .quicker-api__channel-key-row').toArray().map(row => row.classList.contains('is-live'))`);
+    const menuUi = () => run(`(() => { const box = $('${detail} [data-role="key-more"]'); return [box.prop('hidden'), box.find('[data-role="key-menu"]').prop('hidden'), box.find('[data-key-action="more"]').attr('aria-expanded'),
+        box.find('[role="menuitem"]').toArray().map(item => item.dataset.keyAction + (item.disabled ? ':off' : ''))]; })()`);
+    await openManager('solo-profile');
+    assert.deepEqual(await run(`(() => { const box = $('${detail} [data-role="key-field"]'); const rotation = box.find('[data-role="key-rotation"]');
+        const middles = rotation.children().toArray().map(item => { const rect = item.getBoundingClientRect(); return rect.top + rect.height / 2; });
+        return [box.children().toArray().map(item => item.dataset.role || item.className.split(' ')[0]), rotation.find('.quicker-api__switch-track').length, Math.abs(middles[0] - middles[1]) < 4,
+            rotation[0].getBoundingClientRect().bottom <= box.find('[data-role="key-list"]')[0].getBoundingClientRect().top, box.find('.quicker-api__channel-key-row .quicker-api__channel-badge').length]; })()`),
+        [['quicker-api__channel-key-head', 'key-rotation', 'key-paste', 'key-list'], 0, true, true, 0]);
+    assert.deepEqual(await liveRows(), [false, false, false], 'a rotating channel that is not applied marks no key');
+    await keyControl('[data-key-rotate]', `control.prop('checked', false).trigger('change')`);
+    assert.deepEqual(await liveRows(), [true, false, false]);
+    await keyControl(`[data-key-toggle="${extraOn}"]`, `control.prop('checked', true).trigger('change')`);
+    assert.deepEqual([await liveRows(), await run(`getComputedStyle($('${detail} .quicker-api__channel-key-row.is-live')[0]).boxShadow.includes('inset')`)], [[false, true, false], true]);
+    await cancelManager();
+    await openManager('pool-profile');
+    assert.deepEqual(await run(`$('${detail} .quicker-api__channel-key-row.is-live').toArray().map(row => row.dataset.keyId)`), [await run(`getActiveSecret('api_key_custom')?.id`)], 'the live key of a rotating channel');
+    await cancelManager();
+    log('channel manager: the rotation switch and its strategy share one line above the key list; the key in use (the selected one, or the live one of a rotating channel) has a green left edge');
+
+    // 11. "更多操作": copy, remove repeats, clear.
+    await openManager('solo-profile');
+    assert.deepEqual(await menuUi(), [false, true, 'false', ['copy', 'dedupe', 'clear']]);
+    await keyAction('more');
+    assert.deepEqual((await menuUi()).slice(1, 3), [false, 'true']);
+    await keyControl('[data-key-action="more"]', `control.trigger($.Event('keydown', { key: 'Escape' }))`);
+    assert.deepEqual([(await menuUi())[1], await run('ownedPopups.size')], [true, 1], 'Escape closes the menu only');
+    await keyAction('more');
+    await keyControl('[data-field="name"]', `control.trigger('pointerdown')`);
+    assert.equal((await menuUi())[1], true, 'pressing elsewhere closes the menu');
+    // Saved keys are compared by value when the host allows reading them; the first of each stays.
+    const recorded = state.recordSecretValues;
+    state.secretValues = { api_key_custom: { [bound]: 'sk-same', [extraOn]: 'sk-other', [extraOff]: 'sk-same' } };
+    await addKey('sk-other');
+    await addKey('sk-fresh');
+    await addKey('sk-fresh');
+    assert.equal((await keyRows()).length, 6);
+    await run('messages.length = 0; true');
+    await keyAction('more');
+    await keyAction('dedupe');
+    await waitFor(`messages.some(item => item.level === 'success' && item.message === '已移除 3 把重复的密钥。')`, 'repeated keys were not removed');
+    assert.deepEqual([(await keyRows()).map(row => row[0]), (await keyValues()).at(-1), (await menuUi())[1]], [[bound, extraOn, ''], 'sk-fresh', true]);
+    await keyAction('dedupe');
+    await waitFor(`messages.some(item => item.level === 'info' && item.message === '没有重复的密钥。')`, 'no notice without repeats');
+    await cancelManager();
+    // Keys the host does not hand out are left alone, and the notice says so.
+    delete state.secretValues;
+    await openManager('solo-profile');
+    await addKey('sk-x');
+    await addKey('sk-x');
+    await run('messages.length = 0; true');
+    await keyAction('dedupe');
+    await waitFor(`messages.some(item => item.level === 'warning' && item.message.startsWith('已移除 1 把重复的密钥。已保存的密钥无法读取，未参与比对。'))`, 'no notice about unread keys');
+    assert.deepEqual((await keyRows()).map(row => row[0]), [bound, extraOn, extraOff, '']);
+    await cancelManager();
+    log('channel manager: "更多操作" holds copy, remove repeats and clear; Escape or a press elsewhere closes it; repeats are removed by value, saved keys only when the host allows reading them');
+
+    // 12. A saved key is edited where it stands: clicked, its row shows the key (when the host allows reading
+    //     it) or empties; a new value replaces the key on save, keeping its place, its switch and its selection.
+    const savedInput = id => `$('${detail} [data-key-saved="${id}"]')`;
+    const focusKey = id => run(`${savedInput(id)}.trigger('pointerdown').trigger('focusin'); true`);
+    const typeKey = (id, value) => run(`${savedInput(id)}.val(${JSON.stringify(value)}).trigger('input'); true`);
+    const blurKey = id => run(`${savedInput(id)}.trigger('focusout'); true`);
+    const replaceKey = async (id, from, to) => {
+        await focusKey(id);
+        await waitFor(`${savedInput(id)}.val() === ${JSON.stringify(from)}`, `the saved key ${from} was not shown for editing`);
+        await typeKey(id, to);
+        await blurKey(id);
+    };
+    state.secretValues = { api_key_custom: { [bound]: 'sk-own', [extraOn]: 'sk-second', [extraOff]: 'sk-third' } };
+    state.recordSecretValues = true;
+    await openManager('solo-profile');
+    assert.deepEqual(await run(`[${savedInput(extraOn)}.prop('readOnly'), ${savedInput(extraOn)}.attr('title')]`), [true, '点击可修改这把密钥']);
+    await focusKey(extraOn);
+    await waitFor(`${savedInput(extraOn)}.val() === 'sk-second'`, 'the saved key was not shown for editing');
+    assert.deepEqual(await run(`[${savedInput(extraOn)}.prop('readOnly'), ${savedInput(extraOn)}.hasClass('quicker-api__secret-masked')]`), [false, true]);
+    await typeKey(extraOn, 'sk-second-new');
+    assert.match(await hint(), /保存时替换 1 把已修改的密钥/);
+    assert.deepEqual([(await keyRows()).map(row => row[0]), await run(`$('${detail} .quicker-api__channel-key-row.is-edited').toArray().map(row => row.dataset.keyId)`)], [[bound, extraOn, extraOff], [extraOn]]);
+    await blurKey(extraOn);
+    assert.deepEqual([(await keyValues())[1], await run(`${savedInput(extraOn)}.prop('readOnly')`)], ['sk-second-new', false]);
+    // Typing the key back leaves it as it was.
+    await focusKey(extraOn);
+    await typeKey(extraOn, 'sk-second');
+    await blurKey(extraOn);
+    assert.deepEqual([await keyValues(), await run(`${savedInput(extraOn)}.prop('readOnly')`), /替换/.test(await hint())], [Array(3).fill('**********'), true, false]);
+    // The channel's own key and a switched-off key get new values.
+    await replaceKey(bound, 'sk-own', 'sk-own-new');
+    await replaceKey(extraOff, 'sk-third', 'sk-third-new');
+    assert.match(await hint(), /保存时替换 2 把已修改的密钥/);
+    await confirmManager();
+    saved = await soloKeys();
+    const stored = id => [state.secretValues.api_key_custom[id], state.secrets.api_key_custom.find(entry => entry.id === id)?.label];
+    assert.deepEqual([saved[0].length, saved[0][1], saved[0].includes(bound) || saved[0].includes(extraOff), saved[1], saved[3], stored(saved[0][0]), stored(saved[0][2])],
+        [3, extraOn, false, [saved[0][2]], saved[0][0], ['sk-own-new', 'Solo · 1'], ['sk-third-new', 'Solo · 3']]);
+    assert.deepEqual([bound, extraOff].map(id => state.secrets.api_key_custom.some(entry => entry.id === id)), [true, true], 'a replaced key stays in the host\'s key store');
+    // A host that does not hand out keys: the row empties for a new value and goes back to its mask untouched.
+    state.recordSecretValues = recorded;
+    delete state.secretValues;
+    await openManager('solo-profile');
+    await run('messages.length = 0; true');
+    await focusKey(extraOn);
+    await settle();
+    assert.deepEqual(await run(`[${savedInput(extraOn)}.val(), ${savedInput(extraOn)}.prop('readOnly'), ${savedInput(extraOn)}.attr('placeholder')]`), ['', false, '输入新密钥以替换，留空则不变']);
+    await blurKey(extraOn);
+    assert.deepEqual([await keyValues(), await run(`${savedInput(extraOn)}.prop('readOnly')`), await run('messages.length')], [Array(3).fill('**********'), true, 0]);
+    await cancelManager();
+    log('channel manager: a saved key is edited in place; its new value replaces it on save where it stands, with its switch and selection, and the old key stays in the host\'s key store');
+
     await openManager('solo-profile');
     await addKey('pw-1');
     await addKey('pw-2');
     await field('format', 'anthropic');
     await field('endpoint', 'https://proxy.invalid');
     assert.deepEqual([await keyRows(), await keyValues(), await keyCount(), (await rotationUi())[0]], [[['', 'radio', true, false], ['', 'radio', false, false]], ['pw-1', 'pw-2'], '', true]);
-    assert.deepEqual(await run(`['add', 'paste', 'copy', 'clear'].map(name => $('${detail} [data-key-action="' + name + '"]').prop('hidden'))`), [true, true, true, true]);
+    assert.deepEqual(await run(`['[data-key-action="add"]', '[data-key-action="paste"]', '[data-role="key-more"]'].map(selector => $('${detail} ' + selector).prop('hidden'))`), [true, true, true]);
     assert.match(await hint(), /暂不支持密钥池/);
     await run('messages.length = 0; [...ownedPopups][0].completeAffirmative()');
     assert.deepEqual(await run(`[ownedPopups.size, soloProfile.format, messages.some(item => item.level === 'warning' && item.message.includes('暂不支持密钥池'))]`), [1, 'openai', true]);
