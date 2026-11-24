@@ -426,3 +426,8 @@ SillyTavern/public/scripts/extensions/third-party/ST-Quicker-Api
 - SillyTavern 原生密钥
 - 已保存的插件设置数据
 - 最后一次安全应用的原生连接字段
+
+## 贡献者
+
+- [Qianzhuo](https://github.com/qianzhuowo)
+- [120221393-dot](https://github.com/120221393-dot)
