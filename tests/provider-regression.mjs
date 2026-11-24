@@ -122,7 +122,10 @@ async function runChannelRegressions({ run, state, settle, log }) {
     const cancelManager = async () => {
         await run('[...ownedPopups][0].completeCancelled(); channelTask');
     };
-    const field = (name, value) => run(`$('.quicker-api__channel-detail [data-field="${name}"]').val(${JSON.stringify(value)}).trigger('input'); true`);
+    // A key is typed into the first empty row of the key list ("添加" adds one when there is none).
+    const field = (name, value) => (name === 'key'
+        ? run(`(() => { const box = $('.quicker-api__channel-detail'); box.find('[data-key-action="add"]').trigger('click'); box.find('[data-key-value]').filter((_, input) => !input.value).first().val(${JSON.stringify(value)}).trigger('input'); return true; })()`)
+        : run(`$('.quicker-api__channel-detail [data-field="${name}"]').val(${JSON.stringify(value)}).trigger('input'); true`));
     const rowFormat = (model, format) => run(`$('.quicker-api__chosen-model').filter((_,r)=>$(r).find('input').val()===${JSON.stringify(model)}).find('.quicker-api__model-format-select').val(${JSON.stringify(format)}).trigger('change'); true`);
 
     state.secrets.api_key_custom.push({ id: 'secret-d', active: false });

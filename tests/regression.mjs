@@ -12,6 +12,9 @@ import { runModelSearchRegressions } from './model-search-regression.mjs';
 import { runModelPickerRegressions } from './model-picker-regression.mjs';
 import { runV310Regressions } from './v310-regression.mjs';
 import { runProviderRegressions } from './provider-regression.mjs';
+import { runKeyPoolRegressions } from './key-pool-regression.mjs';
+import { runBackupRegressions } from './backup-regression.mjs';
+import { runQuickMenuRegressions } from './quick-menu-regression.mjs';
 
 // Run from the plugin: node tests/regression.mjs
 // Override CHROME_PATH and ST_PUBLIC_DIR when the host/browser is elsewhere.
@@ -102,7 +105,7 @@ const server = createServer(async (req, res) => {
                 state.secrets ??= Object.fromEntries(['api_key_custom', 'api_key_claude', 'api_key_makersuite'].map(key => [key, [{ id: 'test-secret', active: true }]]));
                 const id = `written-${state.requests.length}`;
                 for (const entry of state.secrets[body.key] ??= []) entry.active = false;
-                state.secrets[body.key].push({ id, active: true, label: body.label });
+                state.secrets[body.key].push({ id, active: true, label: body.label }); if (state.recordSecretValues) ((state.secretValues ??= {})[body.key] ??= {})[id] = body.value;
                 res.end(JSON.stringify({ id })); return;
             }
             case '/api/secrets/rotate':
@@ -117,6 +120,14 @@ const server = createServer(async (req, res) => {
                 const value = state.secretValues?.[body.key]?.[body.id];
                 if (typeof value !== 'string') { res.writeHead(403).end('{}'); return; }
                 res.end(JSON.stringify({ value })); return;
+            }
+            case '/api/backends/chat-completions/generate': {
+                // Like the host backend: the request is sent with whatever key is active in the slot right now.
+                const key = state.secrets?.api_key_custom?.find(entry => entry.active)?.id || '';
+                (state.generated ??= []).push(key);
+                const reply = state.generateReply?.(key, body) || {};
+                res.writeHead(reply.status || 200, reply.statusText || undefined);
+                res.end(JSON.stringify(reply.body ?? { choices: [{ message: { content: 'ok' } }] })); return;
             }
             default: res.writeHead(404).end('{}');
         }
@@ -320,7 +331,7 @@ try {
     const foldRequestCount = state.requests.filter(request => request.path === savePath).length;
     await run(`$('#quicker_api_key_input').val('draft-only-not-a-real-key').trigger('input'); document.getElementById('quicker_api_toggle').click()`);
     const folded = await run(`({text:$('#quicker_api_summary').text(),hidden:$('#quicker_api_body').prop('hidden'),key:$('#quicker_api_key_input').val(),expanded:$('#quicker_api_toggle').attr('aria-expanded')})`);
-    assert.equal(folded.text, `OpenAI Compatible · ${profile.name} · model-c`);
+    assert.equal(folded.text, `OpenAI 兼容 · ${profile.name} · model-c`);
     assert.equal(folded.hidden, true); assert.equal(folded.key, 'draft-only-not-a-real-key'); assert.equal(folded.expanded, 'false');
     const churn = await run(`(async () => {
         flushPanelState();
@@ -484,6 +495,9 @@ try {
         await runV310Regressions({ page: v310Page, log, setViewport: (width, height, mobile = true) => cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile }, v310Page.sessionId) });
     }
     await runProviderRegressions({ page: await newPage(), state, log });
+    await runKeyPoolRegressions({ page: await newPage(), state, log });
+    await runBackupRegressions({ page: await newPage(), state, log });
+    await runQuickMenuRegressions({ page: await newPage(), state, log });
     assert.deepEqual(exceptions, [], `Unexpected browser exceptions: ${JSON.stringify(exceptions)}`);
     console.log(`\n${passed} regression checks passed (${host}). Host APIs and account data were simulated in memory.`);
 } finally {

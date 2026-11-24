@@ -125,7 +125,7 @@ export function createPlatformAdapter({ openai, settingsApi, cancelDebounce, $ }
     }
 
     function selectSource(source, apiFormat = 'openai_compat') {
-        if (source === customSource && !supportsCustomFormat(apiFormat)) throw new Error('当前宿主不支持该 Custom 协议。');
+        if (source === customSource && !supportsCustomFormat(apiFormat)) throw new Error('当前宿主不支持该自定义协议。');
         const selection = source === customSource ? CUSTOM_FORMAT_SELECTIONS[apiFormat] : source;
         rememberParameterEditors();
         const changed = !matchesSource(source, native, apiFormat) || ($ && $('#chat_completion_source').val() !== selection);

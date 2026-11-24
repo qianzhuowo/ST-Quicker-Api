@@ -2,7 +2,7 @@ import { extension_settings } from '../../../extensions.js';
 import { chat_completion_sources, oai_settings, openai_settings, openai_setting_names, proxies } from '../../../openai.js';
 import { SECRET_KEYS, secret_state } from '../../../secrets.js';
 import { Popup, POPUP_TYPE } from '../../../popup.js';
-import { cancelDebounce } from '../../../utils.js';
+import { cancelDebounce, download } from '../../../utils.js';
 import { eventSource, event_types, getRequestHeaders, saveSettings, saveSettingsDebounced } from '../../../../script.js';
 import { yaml } from '../../../../lib.js';
 import * as openaiHost from '../../../openai.js';
@@ -56,7 +56,7 @@ for (const protocol of Object.keys(CUSTOM_PROTOCOLS)) {
 }
 const FORMATS = Object.freeze({
     openai: {
-        label: 'OpenAI Compatible',
+        label: 'OpenAI 兼容',
         source: chat_completion_sources.CUSTOM,
         secretKey: SECRET_KEYS.CUSTOM,
         keyInput: '#api_key_custom',
@@ -121,6 +121,8 @@ const DEFAULT_SETTINGS = {
     blockedSecretKeys: {},
     quickActions: [],
     quickActionPlacement: 'leftSendForm',
+    // What the quick entry menu lists: saved schemes, or every channel's favorite models.
+    quickMenuMode: 'schemes',
     // The quick action last applied by the user; its parameter overrides are
     // used only while the live connection still matches it.
     activeQuickActionId: '',
@@ -324,7 +326,7 @@ function renderOpenCodeFields(profile, format) {
     $('#quicker_api_opencode_fields').toggle(format === 'opencode');
     $('#quicker_api_opencode_format').val(profile?.opencodeApiFormat || oai_settings.opencode_api_format || 'openai_compat');
     $('#quicker_api_url').attr('type', format === 'opencode' ? 'text' : 'url')
-        .attr('placeholder', format === 'opencode' ? 'zen / go 或官方 OpenCode URL' : 'Custom 必填；Anthropic / Gemini 留空使用官方端点');
+        .attr('placeholder', format === 'opencode' ? 'zen / go 或官方 OpenCode URL' : '自定义格式必填；Anthropic / Gemini 留空使用官方端点');
 }
 
 function normalizeFormat(value) {
@@ -341,6 +343,14 @@ function getSecretEntry(key, id) {
 
 function getActiveSecret(key) {
     return getSecretEntries(key).find(entry => entry.active) || null;
+}
+
+// What a key list may show of a key: the host's masked value, or the same mask
+// (the last three characters of a long key) when the host exposes the plain value.
+function keyPreview(value) {
+    if (typeof value !== 'string' || !value) return '';
+    if (/^\*{7}/.test(value)) return value;
+    return value.length > 10 ? `${'*'.repeat(7)}${value.slice(-3)}` : '*'.repeat(10);
 }
 
 function presetLinkEnabled() {
@@ -385,7 +395,7 @@ function boundPresetModel(name, profile) {
 }
 
 function uniqueName(baseName, ignoredId = null) {
-    const base = sanitizeName(baseName) || 'API Profile';
+    const base = sanitizeName(baseName) || 'API 配置';
     const used = new Set(profiles().filter(profile => profile.id !== ignoredId).map(profile => profile.name.toLocaleLowerCase()));
     if (!used.has(base.toLocaleLowerCase())) return base;
     let index = 2;
@@ -510,7 +520,7 @@ function normalizeProfile(raw) {
     }
     const profile = {
         id: normalizeText(raw?.id) || makeId(),
-        name: sanitizeName(raw?.name) || 'API Profile',
+        name: sanitizeName(raw?.name) || 'API 配置',
         format,
         endpoint: String(raw?.endpoint || (format === 'opencode' ? 'zen' : '')).slice(0, 2048),
         opencodeApiFormat: format === 'opencode' ? String(raw?.opencodeApiFormat || 'openai_compat') : '',
@@ -527,6 +537,13 @@ function normalizeProfile(raw) {
         secretId: String(raw?.secretId || ''),
         proxyPreset: String(raw?.proxyPreset || ''),
         needsSecret: Boolean(raw?.needsSecret),
+        // Secret ids of the keys this Profile holds in its own key slot.
+        // Only a pool of two or more that contains `secretId` is kept.
+        keyPool: usesProxyProfile(format, String(raw?.endpoint || '')) ? [] : normalizeKeyPool(raw?.keyPool, String(raw?.secretId || '')),
+        // Keys of the pool that are kept but switched off (never `secretId`), and how
+        // the enabled ones are used: 'off' keeps to `secretId`, the rest rotate.
+        keyPoolDisabled: [],
+        keyRotation: normalizeKeyRotation(raw?.keyRotation),
         // Per-model protocol overrides, only for favorites; a model without one uses `format`.
         modelFormats: normalizeModelFormats(favoriteEntries(raw?.modelFormats, availableModels), format),
         // Credentials of other key slots those overrides need (slot -> secret id / proxy preset).
@@ -539,7 +556,12 @@ function normalizeProfile(raw) {
         draft: Boolean(raw?.draft),
         updatedAt: String(raw?.updatedAt || ''),
     };
+    profile.keyPoolDisabled = normalizeKeyPoolDisabled(raw?.keyPoolDisabled, profile.keyPool, profile.secretId);
     if (!profile.draft) delete profile.draft;
+    if (!profile.keyPoolDisabled.length) delete profile.keyPoolDisabled;
+    // Sequential rotation is what a pool does when nothing else is stored.
+    if (!profile.keyPool.length || profile.keyRotation === 'sequential') delete profile.keyRotation;
+    if (!profile.keyPool.length) delete profile.keyPool;
     return profile;
 }
 
@@ -593,6 +615,7 @@ function initializeSettings() {
     value.quickActionPlacement = ['leftSendForm', 'rightSendForm', 'qrButtons', 'disabled'].includes(value.quickActionPlacement)
         ? value.quickActionPlacement
         : 'rightSendForm';
+    value.quickMenuMode = normalizeQuickMenuMode(value.quickMenuMode);
     value.quickActions = Array.isArray(value.quickActions)
         ? value.quickActions.map(normalizeQuickAction).filter(action => action.preset || action.profileId || action.model)
         : [];
@@ -700,7 +723,8 @@ function toolbarHtml() {
                     <button id="quicker_api_save" class="menu_button quicker-api__icon-button quicker-api__save-button" type="button" title="保存 API 设置" aria-label="保存 API 设置"><i class="fa-solid fa-floppy-disk"></i></button>
                     <button id="quicker_api_rename" class="menu_button quicker-api__icon-button" type="button" title="重命名 API 设置" aria-label="重命名 API 设置"><i class="fa-solid fa-pen"></i></button>
                     <button id="quicker_api_copy" class="menu_button quicker-api__icon-button" type="button" title="复制 API 设置" aria-label="复制 API 设置"><i class="fa-solid fa-clone"></i></button>
-                    <button id="quicker_api_import_native" class="menu_button quicker-api__text-button" type="button" title="批量迁移 SillyTavern 的 OpenAI、Reverse Proxy Presets 和 Connection Manager 配置" aria-label="导入原 OAI 设置"><i class="fa-solid fa-file-import"></i><span class="quicker-api__desktop-label">导入原 OAI 设置</span></button>
+                    <button id="quicker_api_import_native" class="menu_button quicker-api__text-button" type="button" title="批量迁移 SillyTavern 原生的 OpenAI 连接、反向代理预设和连接配置（Connection Manager）" aria-label="导入原 OAI 设置"><i class="fa-solid fa-file-import"></i><span class="quicker-api__desktop-label">导入原 OAI 设置</span></button>
+                    <button id="quicker_api_backup" class="menu_button quicker-api__icon-button" type="button" title="备份与恢复：导出全部配置到文件，或从备份文件恢复" aria-label="备份与恢复"><i class="fa-solid fa-box-archive"></i></button>
                     <button id="quicker_api_delete" class="menu_button quicker-api__icon-button quicker-api__delete-button" type="button" title="删除 API 设置" aria-label="删除 API 设置"><i class="fa-solid fa-trash"></i></button>
                 </div>
             </div>
@@ -711,7 +735,7 @@ function toolbarHtml() {
             <div class="quicker-api__field">
                 <label for="quicker_api_url">URL</label>
                 <div class="quicker-api__row quicker-api__url-row">
-                    <input id="quicker_api_url" class="text_pole" type="url" autocomplete="off" placeholder="Custom 必填；Anthropic / Gemini 留空使用官方端点" />
+                    <input id="quicker_api_url" class="text_pole" type="url" autocomplete="off" placeholder="自定义格式必填；Anthropic / Gemini 留空使用官方端点" />
                     <button id="quicker_api_quick_url" class="menu_button quicker-api__text-button" type="button" title="从常用端点中快捷填入 URL" aria-label="快捷 URL" aria-haspopup="menu" aria-expanded="false"><i class="fa-solid fa-link"></i><span class="quicker-api__desktop-label">快捷 URL</span><i class="fa-solid fa-caret-down quicker-api__desktop-label"></i></button>
                 </div>
             </div>
@@ -725,7 +749,7 @@ function toolbarHtml() {
                 </select>
             </div>
             <div class="quicker-api__field quicker-api__key-field">
-                <label for="quicker_api_key_input">Key / Password</label>
+                <label for="quicker_api_key_input">密钥 / 密码</label>
                 <div class="quicker-api__row quicker-api__key-row">
                     <input id="quicker_api_key_input" class="text_pole flex1 quicker-api__secret-masked" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="无凭据" />
                     <div class="quicker-api__key-actions">
@@ -889,8 +913,8 @@ function connectionFor(profile, format = profile?.format) {
     const credential = slot === credentialSlot(profile.format, profile.endpoint)
         ? { secretId: profile.secretId, proxyPreset: profile.proxyPreset, needsSecret: profile.needsSecret }
         : slot === 'proxy'
-            ? { secretId: '', proxyPreset: String(extra.proxy || ''), needsSecret: false }
-            : { secretId: String(extra[slot] || ''), proxyPreset: '', needsSecret: !extra[slot] };
+            ? { secretId: '', proxyPreset: String(extra.proxy || ''), needsSecret: false, keyPool: [] }
+            : { secretId: String(extra[slot] || ''), proxyPreset: '', needsSecret: !extra[slot], keyPool: [] };
     return {
         ...profile,
         ...credential,
@@ -920,14 +944,233 @@ function connectionMissingCredential(connection) {
     return !connection.secretId || !getSecretEntry(FORMATS[connection.format].secretKey, connection.secretId);
 }
 
-function setConnectionSecret(profile, format, secretId) {
+// `keepPool`: a key from outside the channel's pool joins it instead of replacing it.
+function setConnectionSecret(profile, format, secretId, { keepPool = false } = {}) {
     const slot = credentialSlot(format, profile.endpoint);
     if (slot === credentialSlot(profile.format, profile.endpoint)) {
         profile.secretId = secretId;
         profile.needsSecret = false;
+        const pool = profile.keyPool || [];
+        if (pool.includes(secretId) || (keepPool && pool.length && pool.length < KEY_POOL_LIMIT)) {
+            // The channel's own key is always one of its enabled keys.
+            if (!pool.includes(secretId)) profile.keyPool = [...pool, secretId];
+            const disabled = (profile.keyPoolDisabled || []).filter(id => id !== secretId);
+            if (disabled.length) profile.keyPoolDisabled = disabled;
+            else delete profile.keyPoolDisabled;
+        } else {
+            // A key from outside the pool replaces the pool.
+            clearKeyPool(profile);
+        }
     } else {
         profile.extraCredentials = { ...profile.extraCredentials, [slot]: secretId };
     }
+}
+
+// ---------------------------------------------------------------------------
+// Key pool: a Profile may hold several keys of its own key slot. Every
+// generation activates the next one in the host's slot before the host sends
+// the request (round-robin), and a request the upstream refused because of its
+// key is sent again with the next key. Both only use /api/secrets/rotate, so
+// no host support for per-request keys is needed.
+// ---------------------------------------------------------------------------
+const KEY_POOL_LIMIT = 100;
+// Extra attempts for one request; each uses a key that request has not tried.
+const KEY_FAILOVER_LIMIT = 3;
+// A key the upstream refused is skipped by the rotation for this long.
+const KEY_COOLDOWN_MS = 60000;
+const GENERATE_PATH = '/api/backends/chat-completions/generate';
+const keyPoolCursors = new Map(); // Profile id -> index of the next key (session only)
+const keyPoolCooldowns = new Map(); // secret id -> time until which it is skipped
+const keyPoolLast = new Map(); // Profile id -> the key the last generation used (random rotation)
+const KEY_POOL_FIELDS = Object.freeze(['keyPool', 'keyPoolDisabled', 'keyRotation']);
+// How a channel with several enabled keys uses them. 'off' is not listed: it
+// keeps to the channel's own key.
+const KEY_ROTATIONS = Object.freeze({
+    sequential: { label: '顺序轮询', summary: count => `${count} 把密钥轮询`, hint: '每次生成按顺序换下一把' },
+    random: { label: '随机轮询', summary: count => `${count} 把密钥随机轮询`, hint: '每次生成随机换一把' },
+    failover: { label: '故障切换', summary: count => `${count} 把密钥，故障时切换`, hint: '一直使用排在最前的可用密钥，被上游拒绝后才换下一把' },
+});
+
+function normalizeKeyRotation(value) {
+    return value === 'off' || Object.hasOwn(KEY_ROTATIONS, String(value)) ? value : 'sequential';
+}
+
+function normalizeKeyPoolDisabled(raw, pool, secretId) {
+    return [...new Set((Array.isArray(raw) ? raw : []).map(id => String(id || '')))].filter(id => id !== secretId && pool.includes(id));
+}
+
+function clearKeyPool(profile) {
+    for (const field of KEY_POOL_FIELDS) delete profile[field];
+}
+
+// After Object.assign(target, normalized): the pool fields the normalized Profile no longer has.
+function dropStaleKeyPoolFields(target, normalized) {
+    for (const field of KEY_POOL_FIELDS) if (!Object.hasOwn(normalized, field)) delete target[field];
+}
+
+// One key per line; blank lines and repeats are dropped.
+function parseKeyList(text) {
+    return [...new Set(String(text ?? '').split(/\r?\n/).map(normalizeText).filter(Boolean))].slice(0, KEY_POOL_LIMIT);
+}
+
+function normalizeKeyPool(raw, secretId) {
+    const pool = [...new Set((Array.isArray(raw) ? raw : []).map(id => String(id || '')).filter(Boolean))].slice(0, KEY_POOL_LIMIT);
+    return secretId && pool.length >= 2 && pool.includes(secretId) ? pool : [];
+}
+
+// The keys a connection holds in its slot: the saved keys of its pool that still
+// exist there, when there are two or more and its own key is among them; else
+// its own key alone.
+function connectionStoredKeys(connection) {
+    if (!connection?.secretId || connection.needsSecret || usesProxyProfile(connection.format, connection.endpoint)) return [];
+    const key = FORMATS[connection.format]?.secretKey;
+    if (!key) return [];
+    const empty = settings().emptySecretIds[key];
+    const exists = id => id !== empty && Boolean(getSecretEntry(key, id));
+    const pool = (connection.keyPool || []).filter(exists);
+    if (pool.length >= 2 && pool.includes(connection.secretId)) return pool;
+    return exists(connection.secretId) ? [connection.secretId] : [];
+}
+
+// The keys a connection rotates through: its enabled keys, when rotation is on
+// and there are two or more of them.
+function connectionKeyPool(connection) {
+    if (normalizeKeyRotation(connection?.keyRotation) === 'off') return [];
+    const disabled = new Set(connection?.keyPoolDisabled || []);
+    const pool = connectionStoredKeys(connection).filter(id => !disabled.has(id));
+    return pool.length >= 2 && pool.includes(connection.secretId) ? pool : [];
+}
+
+function keyPoolSummary(connection) {
+    const count = connectionKeyPool(connection).length;
+    return count ? KEY_ROTATIONS[normalizeKeyRotation(connection.keyRotation)].summary(count) : '';
+}
+
+// The slot's active key belongs to the connection: its own key or one of its pool.
+function connectionAcceptsSecret(connection, secretId) {
+    return secretId === connection.secretId || (Boolean(secretId) && connectionKeyPool(connection).includes(secretId));
+}
+
+// The pool a generation request rotates through: the applied Profile's, and only
+// when the request really is that Profile's own connection and does not already
+// name a key itself.
+function requestKeyPool(generateData) {
+    if (extensionDisabled || teardownPending || settings().nativeUi || normalizeText(generateData?.secret_id)) return null;
+    const profile = profiles().find(item => item.id === settings().activeProfileId);
+    if (!profile || profile.draft || (profile.keyPool || []).length < 2 || !requestMatchesProfile(profile, generateData)) return null;
+    const connection = connectionFor(profile, effectiveFormat(profile, generateData.model));
+    const pool = connectionKeyPool(connection);
+    return pool.length ? { profile, key: FORMATS[connection.format].secretKey, pool, strategy: normalizeKeyRotation(connection.keyRotation) } : null;
+}
+
+// The next key of the pool, skipping `exclude` and (while another key is
+// available) keys the upstream refused a moment ago. Sequential: the next one
+// in order. Random: any, but not the one used a moment ago. Failover: always
+// the first one in order.
+function nextPoolKey(profileId, pool, exclude = new Set(), strategy = 'sequential') {
+    const now = Date.now();
+    if (strategy === 'random' || strategy === 'failover') {
+        const usable = pool.filter(id => !exclude.has(id));
+        const ready = usable.filter(id => (keyPoolCooldowns.get(id) || 0) <= now);
+        let candidates = ready.length ? ready : usable;
+        if (!candidates.length) return '';
+        if (strategy === 'random' && candidates.length > 1) candidates = candidates.filter(id => id !== keyPoolLast.get(profileId));
+        const id = strategy === 'failover' ? candidates[0] : candidates[Math.floor(Math.random() * candidates.length)];
+        keyPoolLast.set(profileId, id);
+        return id;
+    }
+    const start = (keyPoolCursors.get(profileId) || 0) % pool.length;
+    let cooling = -1;
+    for (let step = 0; step < pool.length; step++) {
+        const index = (start + step) % pool.length;
+        if (exclude.has(pool[index])) continue;
+        if ((keyPoolCooldowns.get(pool[index]) || 0) > now) {
+            if (cooling < 0) cooling = index;
+            continue;
+        }
+        keyPoolCursors.set(profileId, (index + 1) % pool.length);
+        return pool[index];
+    }
+    if (cooling < 0) return '';
+    keyPoolCursors.set(profileId, (cooling + 1) % pool.length);
+    return pool[cooling];
+}
+
+// rotateSecretVerified serializes activations, so concurrent generations never interleave them.
+function activatePoolKey(key, id) {
+    return rotateSecretVerified(key, id);
+}
+
+// Rotation. The host awaits this listener and reads the slot's active key
+// when the request arrives, so the key activated here is the one it sends.
+function rotateKeyPoolForRequest(generateData) {
+    // A running operation owns the key slots; the request uses the current key.
+    if (pendingOperations) return undefined;
+    const target = requestKeyPool(generateData);
+    if (!target) return undefined;
+    const id = nextPoolKey(target.profile.id, target.pool, new Set(), target.strategy);
+    return activatePoolKey(target.key, id).then(activated => {
+        if (!activated) console.warn('[QuickerApi] Key pool rotation could not be confirmed; the request uses the slot\'s current key.');
+    });
+}
+
+// Whether a generation response reports that the upstream refused the key, and
+// with which status. Only what the host forwards verbatim is trusted: the HTTP
+// status (the host turns 401 into "400 Unauthorized"), or, for the host's
+// non-streaming JSON error, the upstream reason phrase it copies into
+// error.message. Response text is never searched for status numbers.
+const KEY_FAILURE_REASONS = Object.freeze({ unauthorized: 401, forbidden: 403, 'too many requests': 429 });
+async function keyFailureStatus(response, body) {
+    if ([401, 403, 429].includes(response.status)) return response.status;
+    if (response.status === 400) return /^unauthorized$/i.test(normalizeText(response.statusText)) ? 401 : 0;
+    if (!response.ok || body.stream || !/json/i.test(response.headers.get('Content-Type') || '')) return 0;
+    try {
+        const data = await response.clone().json();
+        if (!data || typeof data !== 'object' || !data.error || typeof data.error !== 'object') return 0;
+        if (data.quota_error === true) return 429;
+        return KEY_FAILURE_REASONS[normalizeText(data.error.message).toLowerCase()] || 0;
+    } catch {
+        return 0;
+    }
+}
+
+// Failover: the identical request is sent again with the next key of the pool,
+// at most KEY_FAILOVER_LIMIT times and never twice with the same key. Nothing
+// of a refused response reaches the host.
+async function failoverGeneration(response, options, resend) {
+    let target = null;
+    let body = null;
+    try {
+        const applied = profiles().find(item => item.id === settings().activeProfileId);
+        if ((applied?.keyPool || []).length < 2) return response;
+        body = JSON.parse(options.body);
+        target = body && typeof body === 'object' ? requestKeyPool(body) : null;
+    } catch {
+        return response;
+    }
+    if (!target) return response;
+    let current = getActiveSecret(target.key)?.id || '';
+    const tried = new Set([current]);
+    const limit = Math.min(KEY_FAILOVER_LIMIT, target.pool.length - 1);
+    let retries = 0;
+    let lastStatus = 0;
+    for (;;) {
+        const status = await keyFailureStatus(response, body);
+        if (!status) break;
+        lastStatus = status;
+        if (current) keyPoolCooldowns.set(current, Date.now() + KEY_COOLDOWN_MS);
+        if (retries >= limit || options.signal?.aborted || extensionDisabled || teardownPending || pendingOperations || presetTransitionBlocked) break;
+        const next = nextPoolKey(target.profile.id, target.pool, tried, target.strategy);
+        if (!next || !await activatePoolKey(target.key, next)) break;
+        retries++;
+        tried.add(next);
+        current = next;
+        try { void response.body?.cancel().catch(() => undefined); } catch { /* Already consumed. */ }
+        console.warn(`[QuickerApi] The upstream refused a pooled key (HTTP ${status}); retrying with the next key (${retries}/${limit}).`);
+        response = await resend();
+    }
+    if (retries) toastr.warning(`密钥池：密钥被上游拒绝（HTTP ${lastStatus}），已自动换用其他密钥重试 ${retries} 次。`);
+    return response;
 }
 
 function credentialSlotLabel(slot) {
@@ -1001,7 +1244,7 @@ async function provisionModelCredentials(profile, format, endpoint, keyValue = '
 }
 
 function provisionFailed(slot) {
-    toastr.warning(`有模型使用的格式需要把密钥另存到「${credentialSlotLabel(slot)}」，但原密钥明文不可读：请在 Key 输入框填写后保存。`);
+    toastr.warning(`有模型使用的格式需要把密钥另存到「${credentialSlotLabel(slot)}」，但原密钥明文不可读：请在密钥输入框填写后保存。`);
     return null;
 }
 
@@ -1019,7 +1262,10 @@ function updateCredentialEditor(profile = selectedProfile()) {
         : proxyMode
             ? (hasCredential ? '已配置代理密码（点击眼睛查看）' : '未配置代理密码')
             : (hasCredential ? '已配置密钥（点击眼睛查看）' : '未配置密钥');
-    clearKeyEditor(placeholder);
+    const storedKeys = hasCredential && !proxyMode ? connectionStoredKeys(profile).length : 0;
+    clearKeyEditor(storedKeys > 1
+        ? `已配置 ${storedKeys} 把密钥（${keyPoolSummary(profile) ? KEY_ROTATIONS[normalizeKeyRotation(profile.keyRotation)].label : '未轮询'}；增减请到渠道管理，在此填写一把会替换全部）`
+        : placeholder);
     $('#quicker_api_native_key_manager').attr('data-key', config.secretKey).data('key', config.secretKey).toggle(!proxyMode);
 }
 
@@ -1292,7 +1538,7 @@ function renderModelControl(profile = selectedProfile(), modelOverride = null) {
         $('<button class="menu_button quicker-api__manage-actions" type="button" title="便捷按钮管理"><i class="fa-solid fa-bolt"></i><span class="quicker-api__desktop-label">便捷按钮管理</span><span class="quicker-api__mobile-label">便捷按钮</span></button>'),
     );
     updateModelTrigger(mainModelPicker);
-    if (reopen) openModelPicker({ host: mainModelPicker, query, focusSearch: refocus });
+    if (reopen) openModelPicker({ host: mainModelPicker, query, focusSearch: refocus, restoreFocus: refocus });
     renderPanelSummary();
 }
 
@@ -1350,6 +1596,8 @@ function modelPickerDropdown(host = currentModelPickerHost()) {
 
 let modelPickerColumns = 1;
 let modelPickerPositionFrame = 0;
+// Height of the visible viewport when the dropdown opened; a shorter one later means an on-screen keyboard.
+let modelPickerOpenViewHeight = 0;
 let modelPickerLayout = null;
 
 function readModelPickerLayout() {
@@ -1410,6 +1658,14 @@ function visibleViewportRect() {
     return { top, left, bottom: top + (viewport?.height || window.innerHeight), right: left + (viewport?.width || window.innerWidth) };
 }
 
+// The search box is being typed in with an on-screen keyboard: the viewport shrank
+// since the dropdown opened, or the device is a touch device.
+function modelPickerKeyboardActive(dropdown, view) {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !dropdown.contains(active) || !active.matches('.quicker-api__model-search-input')) return false;
+    return view.bottom - view.top < modelPickerOpenViewHeight - 1 || Boolean(globalThis.matchMedia?.('(pointer: coarse)').matches);
+}
+
 function positionModelPicker() {
     modelPickerPositionFrame = 0;
     const host = openModelPickerHost;
@@ -1419,8 +1675,13 @@ function positionModelPicker() {
     if (!dropdown || dropdown.hidden || !trigger) return;
     const rect = trigger.getBoundingClientRect();
     const view = visibleViewportRect();
-    // The trigger was hidden (drawer closed) or scrolled fully out of view.
-    if ((!rect.width && !rect.height) || rect.bottom < view.top || rect.top > view.bottom) return closeModelPicker();
+    // The trigger was hidden (drawer closed).
+    if (!rect.width && !rect.height) return closeModelPicker();
+    // The trigger is fully out of view. While the search box is typed in, that is the
+    // on-screen keyboard covering it (or the browser scrolling the focused box into
+    // view): closing would drop the focus and dismiss the keyboard again, so the
+    // dropdown stays and is kept inside the visible area instead.
+    if ((rect.bottom < view.top || rect.top > view.bottom) && !modelPickerKeyboardActive(dropdown, view)) return closeModelPicker();
     applyModelPickerLayout(dropdown);
     const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
     const margin = 8;
@@ -1468,7 +1729,7 @@ function unbindModelPickerPosition() {
     modelPickerPositionFrame = 0;
 }
 
-function openModelPicker({ host = mainModelPicker, query = '', focusSearch = true } = {}) {
+function openModelPicker({ host = mainModelPicker, query = '', focusSearch = true, restoreFocus = false } = {}) {
     if (openModelPickerHost && openModelPickerHost !== host) closeModelPicker();
     const picker = modelPickerElement(host);
     const dropdown = modelPickerDropdown(host);
@@ -1483,12 +1744,17 @@ function openModelPicker({ host = mainModelPicker, query = '', focusSearch = tru
     if (!portal.length) portal = $(`<div id="${host.id}_portal" class="quicker-api__model-portal openDrawer pinnedOpen">`).appendTo(host.portalParent());
     dropdown.appendTo(portal).prop('hidden', false);
     $(`#${host.id}_trigger`).attr('aria-expanded', 'true');
+    if (!wasOpen) {
+        const view = visibleViewportRect();
+        modelPickerOpenViewHeight = view.bottom - view.top;
+    }
     positionModelPicker();
     if (!wasOpen) bindModelPickerPosition();
     const search = dropdown.find('.quicker-api__model-search-input').val(query);
     renderModelPickerOptions(host);
-    // Avoid summoning the on-screen keyboard on touch devices.
-    if (focusSearch && !globalThis.matchMedia?.('(pointer: coarse)').matches) search[0]?.focus({ preventScroll: true });
+    // Avoid summoning the on-screen keyboard on touch devices, but give back a
+    // focus the search box already had before a re-render.
+    if (restoreFocus || (focusSearch && !globalThis.matchMedia?.('(pointer: coarse)').matches)) search[0]?.focus({ preventScroll: true });
 }
 
 function closeModelPicker({ host = currentModelPickerHost(), focusTrigger = false } = {}) {
@@ -1782,7 +2048,7 @@ function renderProfileEditor(profile = selectedProfile(), modelOverride = null) 
 }
 
 function renderProfiles(preferredId = null) {
-    const select = $('#quicker_api_profile_select').empty().append($('<option>').val('').text('— 选择 API Profile —'));
+    const select = $('#quicker_api_profile_select').empty().append($('<option>').val('').text('— 选择 API 配置 —'));
     for (const profile of [...profiles()].sort((a, b) => a.name.localeCompare(b.name))) {
         if (!isFormatSupported(profile.format) && !$('#quicker_api_format option').toArray().some(option => option.value === profile.format)) {
             $('#quicker_api_format').append($('<option disabled>').val(profile.format).text(`${FORMATS[profile.format].label}（当前宿主不支持）`));
@@ -1834,9 +2100,13 @@ function adoptNativeActiveSecret(profile) {
     if (usesProxyProfile(connection.format, connection.endpoint) || !profileMatchesNative(profile, { includeModel: false })) return false;
     const key = FORMATS[connection.format].secretKey;
     if (getBlockedSecretMessage(key)) return false;
+    // A rotating pool owns its slot: generations rotate through it, so a key
+    // picked elsewhere is not adopted. Without rotation the picked key becomes
+    // the channel's key and joins its saved keys.
+    if (connectionKeyPool(connection).length) return false;
     const active = getActiveSecret(key);
     if (!active || active.id === connection.secretId || active.id === settings().emptySecretIds[key]) return false;
-    setConnectionSecret(profile, connection.format, active.id);
+    setConnectionSecret(profile, connection.format, active.id, { keepPool: true });
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
     return true;
@@ -1878,24 +2148,25 @@ function renderStatus(extraMessage = '') {
     const presetName = currentPresetName();
     if (profile) {
         if (!isFormatSupported(profile.format)) return setStatus('当前宿主不支持该格式；配置已保留但不能应用。', 'warning');
-        if (profile.draft) return setStatus('新配置尚未保存：填写 URL、Key 与模型后点击“保存 API 设置”。', 'warning');
+        if (profile.draft) return setStatus('新配置尚未保存：填写 URL、密钥与模型后点击“保存 API 设置”。', 'warning');
         const connection = liveConnection(profile);
         const proxyMode = usesProxyProfile(connection.format, connection.endpoint);
         const blockedMessage = proxyMode ? '' : getBlockedSecretMessage(FORMATS[connection.format].secretKey);
         if (blockedMessage) return setStatus('安全阻断：凭据状态无法确认。', 'warning');
-        if (settings().activeProfileId !== profile.id) return setStatus(extraMessage || '所选 Profile 未应用。', 'warning');
+        if (settings().activeProfileId !== profile.id) return setStatus(extraMessage || '所选配置未应用。', 'warning');
         if (editorHasUnsavedChanges(profile)) return setStatus('当前修改尚未保存。', 'warning');
         if (!profileMatchesNative(profile, { includeModel: false })
-            || (!proxyMode && getActiveSecret(FORMATS[connection.format].secretKey)?.id !== connection.secretId)) {
-            return setStatus('原生连接与所选 Profile 不一致，请重新应用。', 'warning');
+            || (!proxyMode && !connectionAcceptsSecret(connection, getActiveSecret(FORMATS[connection.format].secretKey)?.id))) {
+            return setStatus('原生连接与所选配置不一致，请重新应用。', 'warning');
         }
-        if (presetLinkEnabled() && presetName && settings().presetBindings[presetName] !== profile.id) return setStatus('当前 preset 未绑定到所选 Profile。', 'warning');
-        if (!profileHasCredential(connection, connection.format, connection.endpoint)) return setStatus('当前 Profile 凭据为空。', 'warning');
-        return setStatus('已保存并安全应用。');
+        if (presetLinkEnabled() && presetName && settings().presetBindings[presetName] !== profile.id) return setStatus('当前预设未绑定到所选配置。', 'warning');
+        if (!profileHasCredential(connection, connection.format, connection.endpoint)) return setStatus('当前配置凭据为空。', 'warning');
+        const pool = keyPoolSummary(connection);
+        return setStatus(pool ? `已保存并安全应用（密钥池：${pool}）。` : '已保存并安全应用。');
     }
     if (Object.keys(settings().blockedSecretKeys).length) return setStatus('安全阻断：凭据状态无法确认。', 'warning');
-    if (presetLinkEnabled() && presetName && !settings().presetBindings[presetName]) return setStatus('当前 preset 未绑定。', 'warning');
-    setStatus(extraMessage || '所选 Profile 未应用。', 'warning');
+    if (presetLinkEnabled() && presetName && !settings().presetBindings[presetName]) return setStatus('当前预设未绑定。', 'warning');
+    setStatus(extraMessage || '所选配置未应用。', 'warning');
 }
 
 function setOperationControlsDisabled(disabled) {
@@ -1976,6 +2247,7 @@ function guardGenerationWhenBlocked(generateData) {
     const profile = profiles().find(item => item.id === settings().activeProfileId) || null;
     excludeProfileBodyParameters(profile, generateData);
     applyQuickActionParameters(generateData);
+    return rotateKeyPoolForRequest(generateData);
 }
 
 // A quick action is "in use" when every part it sets matches the live state.
@@ -2071,7 +2343,17 @@ async function writeSecretVerified(key, value, label) {
     }
 }
 
-async function rotateSecretVerified(key, id) {
+// Every activation of a key goes through one queue, in call order: a key pool
+// rotation that started before a Profile switch always lands before the
+// switch's own activation, never after it.
+let secretRotationQueue = Promise.resolve();
+function rotateSecretVerified(key, id) {
+    const run = () => rotateSecretNow(key, id);
+    secretRotationQueue = secretRotationQueue.then(run, run);
+    return secretRotationQueue;
+}
+
+async function rotateSecretNow(key, id) {
     if (!id) return false;
     try {
         const response = await fetchWithTimeout('/api/secrets/rotate', {
@@ -2170,7 +2452,7 @@ async function rollbackStaleCredential(config, previousSecretId, message) {
     if (previousSecretId && await rotateSecretVerified(config.secretKey, previousSecretId)) return true;
     const safeId = await ensureEmptySecret(config.secretKey);
     if (safeId) {
-        toastr.warning('旧 Profile 已取消，但原密钥无法恢复；对应密钥槽已切换到安全空密钥。');
+        toastr.warning('旧配置已取消，但原密钥无法恢复；对应密钥槽已切换到安全空密钥。');
         return false;
     }
     setCredentialSafetyBlock(config.secretKey, message);
@@ -2199,7 +2481,7 @@ function writeNativeFields(profile, proxyPassword, applyModel, modelOverride = n
         const model = modelOverride ?? profile.model;
         oai_settings[config.modelField] = model;
         if (model) {
-            if (!applyExplicitModel(model, profile.format)) throw new Error('无法应用 Profile 模型，请检查模型 ID。');
+            if (!applyExplicitModel(model, profile.format)) throw new Error('无法应用配置的模型，请检查模型 ID。');
         } else {
             $(config.modelInput).val('').trigger(isCustomFormat(profile.format) ? 'input' : 'change');
         }
@@ -2268,7 +2550,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
     const targetModel = applyModel ? normalizeText(modelOverride ?? profile.model) : '';
     const connection = connectionFor(profile, applyModel ? effectiveFormat(profile, targetModel) : profile.format);
     if (connectionMissingCredential(connection)) {
-        toastr.warning(`模型“${targetModel}”使用 ${FORMATS[connection.format].label} 格式，需要该格式的密钥：请在渠道管理中填写 Key 后保存。`);
+        toastr.warning(`模型“${targetModel}”使用 ${FORMATS[connection.format].label} 格式，需要该格式的密钥：请在渠道管理中填写密钥后保存。`);
         renderProfiles(settings().selectedProfileId);
         return false;
     }
@@ -2279,7 +2561,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
     if (proxyMode) {
         const proxyPreset = getBoundProxyPreset(connection);
         if (!proxyPreset || normalizeText(proxyPreset.url) !== normalizeText(connection.endpoint)) {
-            toastr.error(`${config.label} 反代 Profile 缺少匹配的原生 Reverse Proxy Preset，请重新保存该 Profile。`);
+            toastr.error(`${config.label} 反代配置缺少匹配的原生反向代理预设，请重新保存该配置。`);
             renderProfiles(settings().selectedProfileId);
             return false;
         }
@@ -2319,14 +2601,14 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
     let targetSecretId = connection.secretId;
     if (!targetSecretId || !authoritative[config.secretKey]?.some(entry => entry.id === targetSecretId)) {
         if (connection !== profile && credentialSlot(connection.format, connection.endpoint) !== credentialSlot(profile.format, profile.endpoint)) {
-            toastr.warning(`${config.label} 格式的密钥已不存在：请在渠道管理中填写 Key 后保存。`);
+            toastr.warning(`${config.label} 格式的密钥已不存在：请在渠道管理中填写密钥后保存。`);
             renderProfiles(settings().selectedProfileId);
             return false;
         }
         const expectedSecret = Boolean(connection.needsSecret || targetSecretId);
         targetSecretId = await ensureEmptySecret(config.secretKey);
         if (expectedGeneration !== profileSelectionGeneration || extensionDisabled) {
-            await rollbackStaleCredential(config, previousSecretId, 'Profile 已被新的原生预设取消，但密钥状态无法确认；生成请求已阻断。');
+            await rollbackStaleCredential(config, previousSecretId, '配置已被新的原生预设取消，但密钥状态无法确认；生成请求已阻断。');
             return false;
         }
         if (!targetSecretId) {
@@ -2340,7 +2622,7 @@ async function applyProfile(profile, expectedGeneration = profileSelectionGenera
     } else {
         const activated = await rotateSecretVerified(config.secretKey, targetSecretId);
         if (expectedGeneration !== profileSelectionGeneration || extensionDisabled) {
-            await rollbackStaleCredential(config, previousSecretId, 'Profile 已被新的原生预设取消，但密钥状态无法确认；生成请求已阻断。');
+            await rollbackStaleCredential(config, previousSecretId, '配置已被新的原生预设取消，但密钥状态无法确认；生成请求已阻断。');
             return false;
         }
         if (!activated) {
@@ -2408,6 +2690,7 @@ function captureNativeProfile(name, format, existing = {}, connection = {}) {
         excludeBody: additional.excludeBody,
         includeHeaders: supportsCustomParameters(normalizedFormat) ? additional.includeHeaders : '',
         secretId,
+        keyPool: sameSlot && !proxyMode ? existing.keyPool : [],
         proxyPreset,
         needsSecret,
         draft: false,
@@ -2581,7 +2864,7 @@ async function createProfile() {
     settings().selectedProfileId = profile.id;
     scheduleSettingsSave();
     renderProfiles(profile.id);
-    toastr.info(`已创建“${profile.name}”；填写 URL、Key 与模型后点击“保存 API 设置”即可启用。`);
+    toastr.info(`已创建“${profile.name}”；填写 URL、密钥与模型后点击“保存 API 设置”即可启用。`);
     $('#quicker_api_url').trigger('focus');
 }
 
@@ -2653,7 +2936,7 @@ async function collectNativeImportCandidates(authoritative) {
     if (currentCustomFormat && (currentCustomUrl || oai_settings.custom_model || activeCustom)) {
         await add({
             sourceRef: 'current-custom', sourceLabel: `当前 ${FORMATS[currentCustomFormat].label}`,
-            name: '当前 Custom 配置', format: currentCustomFormat, endpoint: currentCustomUrl,
+            name: '当前自定义配置', format: currentCustomFormat, endpoint: currentCustomUrl,
             model: oai_settings.custom_model, sourceSecretKey: SECRET_KEYS.CUSTOM,
             sourceSecretId: activeCustom?.id,
             ...nativeAdditionalParameters(platform.customSelection(FORMATS[currentCustomFormat].apiFormat)),
@@ -2817,6 +3100,415 @@ async function importNativeProfile() {
     if (pending) toastr.warning(`${pending} 个配置需要重新配置凭据。`);
 }
 
+// Backup and restore. A backup is one JSON file with the plugin's own data:
+// Profiles (their keys in plaintext only when asked), quick actions, quick URLs
+// and preset bindings. Restoring only adds: no existing Profile, secret or native
+// proxy preset is replaced, and a name already in use gets a numeric suffix.
+const BACKUP_TYPE = 'st-quicker-api-backup';
+const BACKUP_FORMAT_VERSION = 1;
+const BACKUP_MAX_BYTES = 20 * 1024 * 1024;
+const BACKUP_MAX_PROFILES = 1000;
+const BACKUP_MAX_ITEMS = 500;
+const BACKUP_PROFILE_FIELDS = Object.freeze(['format', 'endpoint', 'opencodeApiFormat', 'model', 'availableModels', 'fetchedModels',
+    'modelListVersion', 'fetchedFromEndpoint', 'includeBody', 'excludeBody', 'includeHeaders', 'modelFormats']);
+let backupPopup = null;
+
+async function buildBackup(includeSecrets) {
+    let unreadable = 0;
+    const read = async (key, id) => {
+        const value = await findSecretBounded(key, id);
+        if (value === null) unreadable++;
+        return normalizeText(value);
+    };
+    const entries = [];
+    for (const profile of profiles()) {
+        if (profile.draft) continue;
+        const key = FORMATS[profile.format].secretKey;
+        let credential = { type: 'none' };
+        if (usesProxyProfile(profile.format, profile.endpoint)) {
+            const password = String(getBoundProxyPreset(profile)?.password || '');
+            credential = { type: 'proxy', ...(password ? (includeSecrets ? { password } : { withheld: true }) : {}) };
+        } else {
+            const stored = connectionStoredKeys(profile);
+            const ids = stored.length ? [profile.secretId, ...stored.filter(id => id !== profile.secretId)]
+                : (profileHasCredential(profile, profile.format, profile.endpoint) ? [profile.secretId] : []);
+            if (ids.length && includeSecrets) {
+                // Every saved key of the channel, its own key first; `disabled` indexes into `keys`.
+                const switchedOff = new Set(profile.keyPoolDisabled || []);
+                const keys = [];
+                const disabled = [];
+                for (const id of ids) {
+                    const value = await read(key, id);
+                    if (!value) continue;
+                    if (switchedOff.has(id)) disabled.push(keys.length);
+                    keys.push(value);
+                }
+                const rotation = normalizeKeyRotation(profile.keyRotation);
+                if (keys.length) {
+                    credential = {
+                        type: 'key', keys,
+                        ...(keys.length > 1 && rotation !== 'sequential' ? { rotation } : {}),
+                        ...(disabled.length ? { disabled } : {}),
+                    };
+                }
+            } else if (ids.length || profile.needsSecret) {
+                // The Profile expects a key that is not in this file.
+                credential = { type: 'key', withheld: true };
+            }
+        }
+        const extraCredentials = {};
+        if (includeSecrets) {
+            for (const [slot, reference] of Object.entries(profile.extraCredentials || {})) {
+                const value = slot === 'proxy'
+                    ? String(proxies.find(proxy => proxy.name === reference)?.password || '')
+                    : (getSecretEntry(slot, reference) ? await read(slot, reference) : '');
+                if (value) extraCredentials[slot] = value;
+            }
+        }
+        entries.push({
+            id: profile.id, name: profile.name,
+            ...Object.fromEntries(BACKUP_PROFILE_FIELDS.map(field => [field, profile[field]])),
+            credential, extraCredentials,
+        });
+    }
+    return {
+        unreadable,
+        backup: {
+            type: BACKUP_TYPE,
+            formatVersion: BACKUP_FORMAT_VERSION,
+            schemaVersion: SCHEMA_VERSION,
+            exportedAt: new Date().toISOString(),
+            includesSecrets: Boolean(includeSecrets),
+            profiles: entries,
+            quickActions: structuredClone(settings().quickActions),
+            quickUrls: structuredClone(settings().quickUrls),
+            presetBindings: { ...settings().presetBindings },
+            presetModels: structuredClone({ ...settings().presetModels }),
+            preferences: { quickActionPlacement: settings().quickActionPlacement, quickMenuMode: settings().quickMenuMode, presetLink: settings().presetLink === true },
+        },
+    };
+}
+
+async function exportBackup(includeSecrets) {
+    if (includeSecrets && !await canReadSecretPlaintext()) {
+        toastr.warning(`无法读取密钥明文，未导出。${keyExposureGuidance().warning} 也可以取消“包含密钥明文”，导出不含密钥的备份。`);
+        return false;
+    }
+    const { backup, unreadable } = await buildBackup(includeSecrets);
+    if (unreadable) {
+        toastr.warning(`有 ${unreadable} 把密钥的明文不可读，未导出。${keyExposureGuidance().warning} 也可以取消“包含密钥明文”，导出不含密钥的备份。`);
+        return false;
+    }
+    if (!backup.profiles.length && !backup.quickActions.length && !backup.quickUrls.length) {
+        toastr.info('没有可备份的内容。');
+        return false;
+    }
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    // SillyTavern's helper returns nothing; TauriTavern's reports delivery and shows its own notice.
+    const result = await download(JSON.stringify(backup, null, 2), `quicker-api-backup-${stamp}.json`, 'application/json');
+    if (result?.delivered === false) return false;
+    if (result === undefined) {
+        toastr.success(`已导出备份：${backup.profiles.length} 个配置${includeSecrets ? '（含密钥明文，请妥善保管）' : '（不含密钥）'}。`);
+    }
+    return true;
+}
+
+function backupCredential(raw, format, endpoint) {
+    if (usesProxyProfile(format, endpoint)) {
+        const password = typeof raw?.password === 'string' ? raw.password : '';
+        return { type: 'proxy', password, keys: [], withheld: !password && raw?.withheld === true };
+    }
+    if (raw?.type !== 'key') return { type: 'none', password: '', keys: [], withheld: false };
+    const keys = parseKeyList((Array.isArray(raw.keys) ? raw.keys : []).filter(key => typeof key === 'string').join('\n'));
+    // The first key is the channel's own and is never switched off.
+    const disabled = [...new Set((Array.isArray(raw.disabled) ? raw.disabled : []).filter(index => Number.isInteger(index) && index > 0 && index < keys.length))];
+    return { type: 'key', password: '', keys, withheld: !keys.length, rotation: normalizeKeyRotation(raw.rotation), disabled };
+}
+
+// Validates a backup file and returns its content in a known shape; throws an
+// Error whose message is shown to the user.
+function parseBackup(text) {
+    let data;
+    try { data = JSON.parse(text); } catch { throw new Error('所选文件不是有效的 JSON 文件。'); }
+    if (!data || typeof data !== 'object' || data.type !== BACKUP_TYPE || !Array.isArray(data.profiles)
+        || !Number.isInteger(data.formatVersion) || data.formatVersion < 1) {
+        throw new Error('所选文件不是 Quicker Api 的备份文件。');
+    }
+    if (data.formatVersion > BACKUP_FORMAT_VERSION || Number(data.schemaVersion) > SCHEMA_VERSION) {
+        throw new Error('备份来自更高版本的 Quicker Api，请先更新插件再恢复。');
+    }
+    const objects = value => (Array.isArray(value) ? value : []).filter(item => item && typeof item === 'object').slice(0, BACKUP_MAX_ITEMS);
+    const record = value => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
+    const entries = [];
+    let skipped = Math.max(0, data.profiles.length - BACKUP_MAX_PROFILES);
+    for (const raw of data.profiles.slice(0, BACKUP_MAX_PROFILES)) {
+        const name = sanitizeName(raw?.name);
+        // An unknown format is never reinterpreted as another one.
+        if (!raw || typeof raw !== 'object' || !name || typeof raw.format !== 'string' || !Object.hasOwn(FORMATS, raw.format)) { skipped++; continue; }
+        const endpoint = String(raw.endpoint || '');
+        const extraCredentials = Object.fromEntries(Object.entries(record(raw.extraCredentials))
+            .filter(([slot, value]) => typeof value === 'string' && value
+                && (slot === 'proxy' || Object.values(FORMATS).some(config => config.secretKey === slot))));
+        entries.push({
+            id: normalizeText(raw.id), name, format: raw.format, endpoint, raw,
+            credential: backupCredential(raw.credential, raw.format, endpoint), extraCredentials,
+        });
+    }
+    return {
+        exportedAt: String(data.exportedAt || ''),
+        includesSecrets: data.includesSecrets === true,
+        skipped,
+        profiles: entries,
+        quickActions: objects(data.quickActions),
+        quickUrls: objects(data.quickUrls),
+        presetBindings: record(data.presetBindings),
+        presetModels: record(data.presetModels),
+        preferences: data.preferences && typeof data.preferences === 'object' ? data.preferences : null,
+    };
+}
+
+function backupProfileMatch(entry) {
+    const name = entry.name.toLocaleLowerCase();
+    const endpoint = normalizeText(entry.endpoint).toLocaleLowerCase();
+    return profiles().find(profile => !profile.draft && profile.format === entry.format
+        && profile.name.toLocaleLowerCase() === name
+        && normalizeText(profile.endpoint).toLocaleLowerCase() === endpoint) || null;
+}
+
+function backupSlotWritable(slot) {
+    return Object.keys(FORMATS).some(format => FORMATS[format].secretKey === slot && isFormatSupported(format));
+}
+
+// choice: { profiles: Set of indexes into backup.profiles, quickActions, quickUrls, presetBindings, preferences }
+async function restoreBackup(backup, choice) {
+    const idMap = new Map();
+    let restored = 0;
+    let pending = 0;
+    let first = null;
+    for (const [index, entry] of backup.profiles.entries()) {
+        if (!choice.profiles.has(index)) {
+            // References to a Profile that is already here keep working.
+            const existing = backupProfileMatch(entry);
+            if (existing && entry.id) idMap.set(entry.id, existing.id);
+            continue;
+        }
+        if (extensionDisabled || teardownPending) break;
+        const id = makeId();
+        const name = uniqueName(entry.name);
+        const key = FORMATS[entry.format].secretKey;
+        let secretId = '';
+        let proxyPreset = '';
+        let keyPool = [];
+        let keyPoolDisabled = [];
+        let incomplete = entry.credential.withheld;
+        if (entry.credential.type === 'proxy') {
+            // Always a new "Quicker · …" preset: a native preset of the same name stays untouched.
+            proxyPreset = ensureBoundProxyPreset(name, entry.endpoint, entry.credential.password, '', id);
+        } else if (entry.credential.type === 'key') {
+            const keys = backupSlotWritable(key) ? entry.credential.keys : [];
+            const writtenAt = [];
+            for (const [position, value] of keys.entries()) {
+                const written = await writeExtraSecret(key, value, keys.length > 1 ? `${name} · ${position + 1}` : name);
+                writtenAt[position] = written;
+                if (written && !keyPool.includes(written)) keyPool.push(written);
+            }
+            secretId = keyPool[0] || '';
+            keyPoolDisabled = (entry.credential.disabled || []).map(position => writtenAt[position]).filter(written => written && written !== secretId);
+            if (keyPool.length < entry.credential.keys.length) incomplete = true;
+        }
+        const extraCredentials = {};
+        for (const [slot, value] of Object.entries(entry.extraCredentials)) {
+            const label = `${name} · ${credentialSlotLabel(slot)}`;
+            if (slot === 'proxy') {
+                if (entry.endpoint) extraCredentials.proxy = ensureBoundProxyPreset(label, entry.endpoint, value, '', id);
+                continue;
+            }
+            const written = backupSlotWritable(slot) ? await writeExtraSecret(slot, value, label) : '';
+            if (written) extraCredentials[slot] = written;
+            else incomplete = true;
+        }
+        const profile = normalizeProfile({
+            ...entry.raw, id, name, secretId, proxyPreset, keyPool, keyPoolDisabled, keyRotation: entry.credential.rotation, extraCredentials,
+            needsSecret: entry.credential.type === 'key' && !secretId,
+            nativeImportFingerprint: '', draft: false, updatedAt: new Date().toISOString(),
+        });
+        profiles().push(profile);
+        if (entry.id) idMap.set(entry.id, id);
+        first ??= profile;
+        restored++;
+        if (incomplete) pending++;
+    }
+
+    let actions = 0;
+    let skippedActions = 0;
+    if (choice.quickActions) {
+        const list = settings().quickActions;
+        for (const raw of backup.quickActions) {
+            const source = normalizeText(raw.profileId);
+            // A scheme never falls back to whatever connection happens to be live.
+            if (source && !idMap.has(source)) { skippedActions++; continue; }
+            const action = normalizeQuickAction({ ...raw, id: '', profileId: idMap.get(source) || '', sequence: list.length }, list.length);
+            if (!action.preset && !action.profileId && !action.model) continue;
+            if (list.some(item => item.name === action.name && item.preset === action.preset && item.profileId === action.profileId && item.model === action.model)) continue;
+            list.push(action);
+            actions++;
+        }
+    }
+    let urls = 0;
+    if (choice.quickUrls) {
+        for (const raw of backup.quickUrls) {
+            const item = normalizeQuickUrl({ ...raw, id: '' });
+            if (!item.name || !isValidQuickUrl(item.url)) continue;
+            if (settings().quickUrls.some(existing => existing.url.toLocaleLowerCase() === item.url.toLocaleLowerCase())) continue;
+            settings().quickUrls.push(item);
+            urls++;
+        }
+    }
+    let bindings = 0;
+    if (choice.presetBindings) {
+        for (const [presetName, source] of Object.entries(backup.presetBindings)) {
+            const target = profiles().find(profile => profile.id === idMap.get(String(source)));
+            // A preset that is already bound keeps its binding.
+            if (!target || !sanitizeName(presetName) || Object.hasOwn(settings().presetBindings, presetName)) continue;
+            settings().presetBindings[presetName] = target.id;
+            const snapshot = backup.presetModels[presetName];
+            if (snapshot && typeof snapshot.model === 'string' && snapshot.format === target.format) {
+                settings().presetModels[presetName] = presetModelSnapshot(target, snapshot.model);
+            }
+            bindings++;
+        }
+    }
+    const preferences = Boolean(choice.preferences && backup.preferences);
+    if (preferences) {
+        settings().quickActionPlacement = normalizeQuickActionPlacement(backup.preferences.quickActionPlacement, settings().quickActionPlacement);
+        if (backup.preferences.quickMenuMode !== undefined) settings().quickMenuMode = normalizeQuickMenuMode(backup.preferences.quickMenuMode);
+        settings().presetLink = backup.preferences.presetLink === true;
+        $('#quicker_api_preset_link').prop('checked', settings().presetLink);
+        if (!settings().presetLink) clearNativePresetSaveIntent();
+    }
+
+    if (!settings().selectedProfileId && first) settings().selectedProfileId = first.id;
+    scheduleSettingsSave();
+    renderProfiles(settings().selectedProfileId);
+    ensureQuickActionEntries();
+    const parts = [restored && `${restored} 个配置`, actions && `${actions} 个便捷方案`, urls && `${urls} 个快捷 URL`,
+        bindings && `${bindings} 个预设绑定`, preferences && '偏好设置'].filter(Boolean);
+    if (parts.length) toastr.success(`已恢复 ${parts.join('、')}。`);
+    else toastr.info('没有新增内容：所选内容已存在。');
+    if (pending) toastr.warning(`${pending} 个配置的密钥未能随备份恢复，请重新填写密钥后保存。`);
+    if (skippedActions) toastr.warning(`${skippedActions} 个便捷方案引用的配置不在本次恢复范围内，已跳过。`);
+    return { restored, pending, actions, skippedActions, urls, bindings, preferences };
+}
+
+async function manageBackup() {
+    if (extensionDisabled || teardownPending || backupPopup) return;
+    const content = $('<div class="quicker-api__model-manager quicker-api__migration quicker-api__backup">');
+    const withSecrets = $('<input type="checkbox" data-backup="secrets">');
+    const exportButton = $('<button type="button" class="menu_button quicker-api__text-button" data-backup="export"><i class="fa-solid fa-file-export"></i><span>导出备份文件</span></button>');
+    const fileInput = $('<input type="file" accept=".json,application/json" data-backup="file" hidden>');
+    const pickButton = $('<button type="button" class="menu_button quicker-api__text-button" data-backup="pick"><i class="fa-solid fa-folder-open"></i><span>选择备份文件</span></button>');
+    const preview = $('<div class="quicker-api__backup-preview">');
+    content.append(
+        $('<section class="quicker-api__backup-section">').append(
+            $('<strong>').text('导出备份'),
+            $('<div class="quicker-api__manager-note">').text('把全部配置、便捷方案、快捷 URL 和预设绑定导出为一个 JSON 文件。尚未保存的草稿配置不会导出。'),
+            $('<label class="checkbox_label">').append(withSecrets, $('<span>').text('包含密钥明文（文件未加密，请妥善保管）')),
+            exportButton,
+        ),
+        $('<section class="quicker-api__backup-section">').append(
+            $('<strong>').text('从备份恢复'),
+            $('<div class="quicker-api__manager-note">').text('恢复只会新增：不会覆盖或删除现有的配置、密钥和原生反代预设，重名的配置会自动加序号。'),
+            pickButton, fileInput, preview,
+        ),
+    );
+    const popup = new Popup(content, POPUP_TYPE.DISPLAY, '', { animation: 'none' });
+    let loaded = null;
+    const setBusy = busy => content.find('button, input').prop('disabled', busy);
+    const showError = message => {
+        loaded = null;
+        preview.empty().append($('<div class="quicker-api__backup-error" role="alert">').text(message));
+        toastr.error(message);
+    };
+    const showBackup = (backup, fileName) => {
+        loaded = backup;
+        const exported = new Date(backup.exportedAt);
+        const facts = [fileName, Number.isNaN(exported.getTime()) ? '' : `导出于 ${exported.toLocaleString()}`,
+            `${backup.profiles.length} 个配置`, backup.includesSecrets ? '含密钥' : '不含密钥（恢复后需重新填写）',
+            backup.skipped ? `${backup.skipped} 个条目无法识别，已忽略` : ''].filter(Boolean);
+        const list = $('<div class="quicker-api__model-list">');
+        backup.profiles.forEach((entry, index) => {
+            const exists = Boolean(backupProfileMatch(entry));
+            const checkbox = $('<input type="checkbox">').attr('data-index', index).prop('checked', !exists);
+            const summary = $('<div class="quicker-api__migration-summary">')
+                .text(`[${FORMATS[entry.format].label}] ${entry.name} · ${entry.endpoint || '官方端点'}${exists ? '（已存在，默认不恢复）' : ''}`);
+            list.append($('<label class="quicker-api__model-item quicker-api__remote-model">').append(checkbox, summary));
+        });
+        const option = (name, label, checked = true) => $('<label class="checkbox_label">').append(
+            $('<input type="checkbox">').attr('data-option', name).prop('checked', checked), $('<span>').text(label));
+        const bindingCount = Object.keys(backup.presetBindings).length;
+        const options = $('<div class="quicker-api__backup-options">').append(
+            backup.quickActions.length ? option('quickActions', `便捷方案（${backup.quickActions.length} 个）`) : null,
+            backup.quickUrls.length ? option('quickUrls', `快捷 URL（${backup.quickUrls.length} 个）`) : null,
+            bindingCount ? option('presetBindings', `预设绑定（${bindingCount} 个）`) : null,
+            // Preferences replace the current ones, so they are only preselected on an empty install.
+            backup.preferences ? option('preferences', '偏好设置（便捷入口位置、联动预设开关）', !profiles().length) : null,
+        );
+        const restoreButton = $('<button type="button" class="menu_button quicker-api__text-button quicker-api__save-button" data-backup="restore"><i class="fa-solid fa-rotate-left"></i><span>恢复所选</span></button>');
+        restoreButton.on('click', async () => {
+            const picked = name => preview.find(`[data-option="${name}"]`).prop('checked') === true;
+            const choice = {
+                profiles: new Set(preview.find('[data-index]:checked').map((_, input) => Number(input.dataset.index)).get()),
+                quickActions: picked('quickActions'), quickUrls: picked('quickUrls'),
+                presetBindings: picked('presetBindings'), preferences: picked('preferences'),
+            };
+            if (!choice.profiles.size && !choice.quickActions && !choice.quickUrls && !choice.presetBindings && !choice.preferences) {
+                toastr.info('请先勾选要恢复的内容。');
+                return;
+            }
+            const backupToRestore = loaded;
+            setBusy(true);
+            let result = null;
+            try {
+                result = await enqueueOperation(() => restoreBackup(backupToRestore, choice));
+            } finally {
+                setBusy(false);
+            }
+            if (result) await popup.completeAffirmative();
+        });
+        preview.empty().append($('<div class="quicker-api__migration-summary">').text(facts.join(' · ')), list, options, restoreButton);
+    };
+    exportButton.on('click', async () => {
+        setBusy(true);
+        try {
+            await enqueueOperation(() => exportBackup(withSecrets.prop('checked') === true));
+        } finally {
+            setBusy(false);
+        }
+    });
+    // Choosing a file holds no operation and has no deadline: the system file
+    // dialog may stay open for as long as the user needs.
+    pickButton.on('click', () => fileInput[0].click());
+    fileInput.on('change', async () => {
+        const file = fileInput[0].files?.[0];
+        fileInput.val('');
+        if (!file) return;
+        if (file.size > BACKUP_MAX_BYTES) return showError('所选文件过大，不是 Quicker Api 的备份文件。');
+        try {
+            showBackup(parseBackup(await file.text()), file.name);
+        } catch (error) {
+            showError(error?.message || '无法读取所选文件。');
+        }
+    });
+    backupPopup = popup;
+    ownedPopups.add(popup);
+    try {
+        await popup.show();
+    } finally {
+        ownedPopups.delete(popup);
+        backupPopup = null;
+    }
+}
+
 async function saveSelectedProfile() {
     let current = selectedProfile();
     const isNew = !current || current.draft;
@@ -2826,7 +3518,7 @@ async function saveSelectedProfile() {
     let editorUrl;
     try { editorUrl = editorEndpoint(format); } catch (error) { toastr.warning(error.message); return; }
     if (isCustomFormat(format) && !editorUrl) {
-        toastr.warning('Custom URL 不能为空。');
+        toastr.warning('自定义格式的 URL 不能为空。');
         return;
     }
     if (!current) {
@@ -2849,7 +3541,7 @@ async function saveSelectedProfile() {
     if (!keyValue && slotChanged && profileHasCredential(current, current.format, current.endpoint)) {
         const carried = await readProfileCredential(current);
         if (!carried) {
-            toastr.warning('协议或 URL 变更后密钥需存入新位置，但原密钥明文不可读：请在 Key 输入框重新填写后保存。');
+            toastr.warning('协议或 URL 变更后密钥需存入新位置，但原密钥明文不可读：请在密钥输入框重新填写后保存。');
             return;
         }
         keyValue = carried;
@@ -2870,14 +3562,16 @@ async function saveSelectedProfile() {
     const ownProxyPassword = !isNew && proxyMode && usesProxyProfile(current.format, current.endpoint)
         ? String(getBoundProxyPreset(current)?.password || '') : undefined;
     const proxiesBefore = profileProxyNames(current);
-    Object.assign(current, captureNativeProfile(current.name, format, captureBase, {
+    const captured = captureNativeProfile(current.name, format, captureBase, {
         endpoint: editorUrl,
         opencodeApiFormat: String($('#quicker_api_opencode_format').val() || ''),
         // A draft or a Profile moved to another slot never borrows the live
         // connection's proxy password.
         proxyPassword: keyValue || retainedProxy?.password || ownProxyPassword || (captureBase.draft || slotChanged ? '' : undefined),
-    }));
+    });
+    Object.assign(current, captured);
     delete current.draft;
+    dropStaleKeyPoolFields(current, captured);
     current.extraCredentials = extraCredentials;
     if (hasManagedModels(format)) {
         // Favorites are explicit; only a brand-new profile starts with its model favorited.
@@ -2911,7 +3605,7 @@ async function saveSelectedProfile() {
     renderProfiles(current.id);
     if (await persistSettingsNow()) {
         if (applied) toastr.success('API 配置已保存并应用到 SillyTavern。');
-        else toastr.warning('API 配置已保存，但未能应用；请检查连接与密钥状态后重新选择该 Profile。');
+        else toastr.warning('API 配置已保存，但未能应用；请检查连接与密钥状态后重新选择该配置。');
     }
 }
 
@@ -2943,7 +3637,7 @@ async function deleteSelectedProfile() {
     const profile = selectedProfile();
     if (!profile) return;
     const usedBy = settings().quickActions.filter(action => action.profileId === profile.id).map((action, index) => quickActionDisplayName(action, index));
-    const content = $('<div>').append($('<p>').text(`删除 Profile“${profile.name}”？`), $('<p>').text('不会删除任何原生密钥；相关原生预设绑定会被解除。'));
+    const content = $('<div>').append($('<p>').text(`删除配置“${profile.name}”？`), $('<p>').text('不会删除任何原生密钥；相关原生预设绑定会被解除。'));
     if (usedBy.length) content.append($('<p>').text(`便捷方案「${usedBy.join('、')}」使用了该配置，删除后会被标记为失效，需要重新选择配置。`));
     if (!await callQuickerPopup(content, POPUP_TYPE.CONFIRM)) return;
     removeProfileData(profile);
@@ -2995,6 +3689,7 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
         profile.proxyPreset = ensureBoundProxyPreset(profile.name, endpoint, value, profile.proxyPreset, profile.id);
         profile.secretId = '';
         profile.needsSecret = false;
+        clearKeyPool(profile);
         oai_settings.proxy_password = value;
         setNativeProxyPasswordField(value);
         profile.updatedAt = new Date().toISOString();
@@ -3017,6 +3712,8 @@ async function saveAndBindInputKey(profile = selectedProfile(), requestedFormat 
     clearCredentialSafetyBlock(config.secretKey);
     profile.secretId = result.id;
     profile.needsSecret = false;
+    // A single key typed here replaces the channel's saved keys.
+    clearKeyPool(profile);
     profile.updatedAt = new Date().toISOString();
     scheduleSettingsSave();
     if (!result.exposureAvailable) {
@@ -3031,13 +3728,13 @@ async function readBoundSecret(profile) {
     if (usesProxyProfile(profile?.format, profile?.endpoint)) {
         const proxyPreset = getBoundProxyPreset(profile);
         if (!proxyPreset) {
-            toastr.warning('当前 Profile 没有可用的原生 Reverse Proxy Preset。');
+            toastr.warning('当前配置没有可用的原生反向代理预设。');
             return null;
         }
         return String(proxyPreset.password || '');
     }
     if (!profile?.secretId) {
-        toastr.info('当前 Profile 未绑定密钥。');
+        toastr.info('当前配置未绑定密钥。');
         return null;
     }
     const value = await findSecretBounded(FORMATS[profile.format].secretKey, profile.secretId);
@@ -3066,6 +3763,10 @@ async function copyBoundSecret() {
     const inputValue = String($('#quicker_api_key_input').val() || '');
     const value = inputValue || await readBoundSecret(selectedProfile());
     if (value === null) return;
+    await copyToClipboard(value, '绑定密钥已复制到剪贴板。');
+}
+
+async function copyToClipboard(value, message) {
     try {
         let timeoutId = null;
         await Promise.race([
@@ -3074,9 +3775,11 @@ async function copyBoundSecret() {
                 timeoutId = setTimeout(() => reject(new Error('Clipboard write timed out')), 5000);
             }),
         ]).finally(() => clearTimeout(timeoutId));
-        toastr.success('绑定密钥已复制到剪贴板。');
+        toastr.success(message);
+        return true;
     } catch {
         toastr.error('浏览器拒绝剪贴板写入。');
+        return false;
     }
 }
 
@@ -3136,7 +3839,9 @@ function buildModelsEndpoint(endpoint) {
     const url = new URL(endpoint);
     url.hash = '';
     url.search = '';
-    url.pathname = url.pathname.replace(/\/(chat\/completions|responses)\/?$/i, '').replace(/\/$/, '') + '/models';
+    // A URL that already names an API route (…/chat/completions, …/responses or
+    // …/models itself) is reduced to its base first, so it never becomes …/models/models.
+    url.pathname = url.pathname.replace(/\/+$/, '').replace(/\/(chat\/completions|responses|models)$/i, '').replace(/\/+$/, '') + '/models';
     return url.toString();
 }
 
@@ -3209,7 +3914,7 @@ async function fetchModelsForProfile(profile, endpoint) {
     let frontendError = null;
     if (!backendOnly) try {
         const key = profile.secretId ? await findSecretBounded(config.secretKey, profile.secretId) : '';
-        if (profile.secretId && key === null) throw new Error('浏览器无权读取已保存 Key');
+        if (profile.secretId && key === null) throw new Error('浏览器无权读取已保存的密钥');
         const headers = { Accept: 'application/json', ...customHeaderObject(profile.includeHeaders) };
         if (key && !Object.keys(headers).some(name => name.toLowerCase() === 'authorization')) headers.Authorization = `Bearer ${key}`;
         const { response, data } = await fetchJsonWithTimeout(buildModelsEndpoint(endpoint), { method: 'GET', headers, cache: 'no-store' });
@@ -3238,13 +3943,14 @@ async function fetchModelsForProfile(profile, endpoint) {
         if (profile.secretId && !boundSecretExists) {
             profile.secretId = '';
             profile.needsSecret = true;
+            clearKeyPool(profile);
             scheduleSettingsSave();
             updateCredentialEditor(profile);
         }
         desiredSecretId = boundSecretExists ? profile.secretId : await ensureEmptySecret(config.secretKey);
-        if (!desiredSecretId) throw new Error(`无法建立 Profile 对应的安全 ${config.label} 密钥`);
+        if (!desiredSecretId) throw new Error(`无法建立配置对应的安全 ${config.label} 密钥`);
         if (previousActiveId !== desiredSecretId && !await rotateSecretVerified(config.secretKey, desiredSecretId)) {
-            throw new Error(`无法激活 Profile 绑定的 ${config.label} 密钥`);
+            throw new Error(`无法激活配置绑定的 ${config.label} 密钥`);
         }
 
         const { response, data } = await fetchJsonWithTimeout('/api/backends/chat-completions/status', {
@@ -3285,11 +3991,11 @@ async function fetchModelsForProfile(profile, endpoint) {
 async function fetchCustomModels() {
     const profile = selectedProfile();
     if (!profile || !hasManagedModels(profile.format)) return toastr.info('请先选择并保存 API 配置。');
-    if (profile.draft) return toastr.info('请先填写并保存新配置的 URL 与 Key，再获取模型。');
-    if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('请先点击保存按钮保存当前 Key，再获取模型。');
+    if (profile.draft) return toastr.info('请先填写并保存新配置的 URL 与密钥，再获取模型。');
+    if (keyEditorDirty && normalizeText($('#quicker_api_key_input').val())) return toastr.info('请先点击保存按钮保存当前密钥，再获取模型。');
     if (profile.format === 'opencode' && $('#quicker_api_opencode_format').val() !== profile.opencodeApiFormat) return toastr.info('协议已变化，请先保存配置再获取模型。');
     const editorUrl = normalizeText($('#quicker_api_url').val());
-    if (!editorUrl && isCustomFormat(profile.format)) return toastr.warning('请先填写 Custom URL。');
+    if (!editorUrl && isCustomFormat(profile.format)) return toastr.warning('请先填写自定义格式的 URL。');
     if (editorUrl !== normalizeText(profile.endpoint)) return toastr.info('URL 已变化，请先保存配置；保存会清空旧远端快照并保留已选模型。');
     try {
         const result = await fetchModelsForProfile(profile, editorUrl);
@@ -3328,6 +4034,70 @@ function matchesModelSearch(model, query) {
 // Every edit is a draft; "保存" commits all channels, "取消" discards them.
 // ---------------------------------------------------------------------------
 
+// The key settings of a saved channel as the channel manager edits them: the
+// saved keys of its own slot (secret ids), the ones switched off, the key used
+// without rotation (a saved key or a new row), whether and how several keys
+// rotate, and the rows of keys that are not saved yet.
+function channelKeyDraft(profile) {
+    const keys = profile ? connectionStoredKeys(profile) : [];
+    const rotation = normalizeKeyRotation(profile?.keyRotation);
+    return {
+        keys,
+        keyDisabled: (profile?.keyPoolDisabled || []).filter(id => keys.includes(id)),
+        keyPrimary: keys.includes(profile?.secretId) ? profile.secretId : (keys[0] || ''),
+        keyRotate: keys.length > 1 && rotation !== 'off',
+        keyStrategy: rotation === 'off' ? 'sequential' : rotation,
+        keyRows: [],
+    };
+}
+
+let channelKeyRowCount = 0;
+
+// A key that is not saved yet. Its ref never equals a secret id.
+function newChannelKeyRow(value = '') {
+    return { ref: `new:${++channelKeyRowCount}`, value, off: false };
+}
+
+// The new keys of a draft that hold a value, each value once.
+function channelTypedRows(draft) {
+    const seen = new Set();
+    const rows = [];
+    for (const row of draft.keyRows || []) {
+        const value = normalizeText(row.value);
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        rows.push({ ref: row.ref, value, off: Boolean(row.off) });
+    }
+    return rows.slice(0, KEY_POOL_LIMIT);
+}
+
+// `draft.key` is what the new rows hold, one key per line.
+function syncChannelKeyText(draft) {
+    draft.key = channelTypedRows(draft).map(row => row.value).join('\n');
+}
+
+// The key a channel uses without rotation: the selected one, else the first.
+function channelPrimaryRef(draft, refs) {
+    return refs.includes(draft.keyPrimary) ? draft.keyPrimary : (refs[0] || '');
+}
+
+// Keys pasted in bulk: one per line, or separated by spaces, commas or semicolons.
+function splitKeyText(text) {
+    return String(text ?? '').split(/[\s,;，；]+/).map(normalizeText).filter(Boolean);
+}
+
+function channelKeyState(draft) {
+    return JSON.stringify([draft.keys || [], draft.keyDisabled || [], draft.keyPrimary || '', Boolean(draft.keyRotate), draft.keyStrategy || 'sequential']);
+}
+
+// Drafts whose rotation switch the user has set by hand; until then it follows
+// what is typed (several keys typed into a channel without a pool turn it on).
+const channelRotationTouched = new WeakSet();
+
+// Drafts whose key in use the user has picked by hand; until then a new key
+// takes over from the saved one when the keys do not rotate.
+const channelPrimaryTouched = new WeakSet();
+
 function channelDraftFrom(profile) {
     return {
         id: profile.id,
@@ -3338,6 +4108,7 @@ function channelDraftFrom(profile) {
         endpoint: profile.endpoint,
         opencodeApiFormat: profile.opencodeApiFormat || 'openai_compat',
         key: '',
+        ...channelKeyDraft(profile),
         available: normalizeModelList(profile.availableModels),
         fetched: profileFetchedModels(profile),
         fetchedFromEndpoint: profileFetchedModels(profile).length ? normalizeText(profile.endpoint) : '',
@@ -3349,14 +4120,15 @@ function newChannelDraft(name) {
     const format = isFormatSupported('openai') ? 'openai' : Object.keys(FORMATS).find(isFormatSupported);
     return {
         id: makeId(), isNew: true, deleted: false, name, format, endpoint: format === 'opencode' ? 'zen' : '',
-        opencodeApiFormat: 'openai_compat', key: '', available: [], fetched: [], fetchedFromEndpoint: '', formats: {},
+        opencodeApiFormat: 'openai_compat', key: '', ...channelKeyDraft(null), available: [], fetched: [], fetchedFromEndpoint: '', formats: {},
     };
 }
 
 const channelCatalogBaselines = new WeakMap();
 
 function channelSnapshot(draft) {
-    return JSON.stringify({ ...draft, available: normalizeModelList(draft.available), formats: channelModelFormats(draft) });
+    // `key` already says what the new rows hold.
+    return JSON.stringify({ ...draft, keyRows: undefined, available: normalizeModelList(draft.available), formats: channelModelFormats(draft) });
 }
 
 // Only favorites keep an override, and only one that differs from the channel.
@@ -3370,7 +4142,8 @@ function channelConnectionChanged(draft, profile) {
     return draft.format !== profile.format
         || normalizeText(draft.endpoint) !== normalizeText(profile.endpoint)
         || (draft.format === 'opencode' && draft.opencodeApiFormat !== profile.opencodeApiFormat)
-        || Boolean(normalizeText(draft.key));
+        || Boolean(normalizeText(draft.key))
+        || channelKeyState(draft) !== channelKeyState(channelKeyDraft(profile));
 }
 
 // Saves a provider's connection without applying it: credentials are written
@@ -3400,7 +4173,14 @@ async function saveChannelConnection(profile, draft) {
     }
     const saved = !profile.draft && !draft.isNew;
     const slotChanged = saved && credentialSlot(profile.format, profile.endpoint) !== credentialSlot(format, endpoint);
-    let keyValue = normalizeText(draft.key);
+    // New keys are added to the channel's saved keys.
+    const typedRows = channelTypedRows(draft);
+    const typedKeys = typedRows.map(row => row.value);
+    if (typedKeys.length > 1 && proxyMode) {
+        toastr.warning(`“${draft.name}”：${FORMATS[format].label} 填写了自定义地址时使用反代密码，暂不支持密钥池；请只填写一把密钥。`);
+        return false;
+    }
+    let keyValue = typedKeys[0] || '';
     if (!keyValue && slotChanged && profileHasCredential(profile, profile.format, profile.endpoint)) {
         const carried = await readProfileCredential(profile);
         if (!carried) {
@@ -3412,20 +4192,64 @@ async function saveChannelConnection(profile, draft) {
     const extraCredentials = await provisionModelCredentials({ ...profile, name: draft.name, modelFormats: channelModelFormats(draft) }, format, endpoint, keyValue);
     if (!extraCredentials) return false;
     let secretId = saved && !slotChanged ? profile.secretId : '';
+    let keyPool = [];
+    let keyPoolDisabled = [];
+    let keyRotation = 'sequential';
     let proxyPreset = '';
     if (proxyMode) {
         const password = keyValue || (saved && !slotChanged ? String(getBoundProxyPreset(profile)?.password || '') : '');
         proxyPreset = ensureBoundProxyPreset(draft.name, endpoint, password, saved && !slotChanged ? profile.proxyPreset : '', profile.id);
         secretId = '';
-    } else if (keyValue) {
-        secretId = await writeExtraSecret(FORMATS[format].secretKey, keyValue, draft.name);
-        if (!secretId) {
-            toastr.error(`“${draft.name}”：密钥保存或激活状态无法确认。`);
-            return false;
+    } else {
+        // Saved keys belong to their slot: they stay only while the slot does, and only
+        // the ones the draft still lists.
+        const had = saved && !slotChanged ? connectionStoredKeys(profile) : [];
+        const kept = (draft.keys || []).filter(id => had.includes(id));
+        const typed = [];
+        const written = new Map(); // row ref -> secret id
+        if (keyValue) {
+            // A key carried over from another slot has no row.
+            const rows = typedRows.length ? typedRows : [{ ref: '', value: keyValue, off: false }];
+            const numbered = kept.length + rows.length > 1;
+            for (const [position, row] of rows.entries()) {
+                const id = await writeExtraSecret(FORMATS[format].secretKey, row.value, numbered ? `${draft.name} · ${kept.length + position + 1}` : draft.name);
+                if (!id) {
+                    toastr.error(`“${draft.name}”：密钥保存或激活状态无法确认。`);
+                    return false;
+                }
+                written.set(row.ref, id);
+                if (!typed.includes(id)) typed.push(id);
+            }
         }
+        const all = [...kept, ...typed.filter(id => !kept.includes(id))].slice(0, KEY_POOL_LIMIT);
+        // A new key keeps the state of its row; a saved key entered again as an enabled row is switched on again.
+        const typedOn = typedRows.filter(row => !row.off).map(row => written.get(row.ref));
+        const switchedOff = new Set([
+            ...(draft.keyDisabled || []).filter(id => kept.includes(id)),
+            ...typedRows.filter(row => row.off).map(row => written.get(row.ref)),
+        ].filter(id => id && !typedOn.includes(id)));
+        let own = '';
+        if (draft.keyRotate && all.length > 1) {
+            const enabled = all.filter(id => !switchedOff.has(id));
+            if (!enabled.length) {
+                toastr.warning(`“${draft.name}”：启用轮询时至少要启用一把密钥。`);
+                return false;
+            }
+            own = enabled.includes(secretId) ? secretId : enabled[0];
+        } else {
+            // Without rotation the channel uses one key: the selected one, else the first.
+            const ref = channelPrimaryRef(draft, [...kept, ...typedRows.map(row => row.ref)]);
+            own = (kept.includes(ref) ? ref : written.get(ref)) || all[0] || '';
+            switchedOff.delete(own);
+        }
+        // A channel that never had a key keeps what it was bound to; removing every saved key unbinds it.
+        if (all.length || had.length) secretId = own;
+        keyPool = all.length > 1 ? all : [];
+        keyPoolDisabled = [...switchedOff];
+        keyRotation = draft.keyRotate ? normalizeKeyRotation(draft.keyStrategy) : 'off';
     }
     const endpointChanged = normalizeText(profile.endpoint) !== endpoint;
-    Object.assign(profile, normalizeProfile({
+    const next = normalizeProfile({
         ...profile,
         format,
         endpoint,
@@ -3433,6 +4257,9 @@ async function saveChannelConnection(profile, draft) {
         includeBody: supportsCustomParameters(format) ? profile.includeBody : '',
         includeHeaders: supportsCustomParameters(format) ? profile.includeHeaders : '',
         secretId,
+        keyPool,
+        keyPoolDisabled,
+        keyRotation,
         proxyPreset,
         needsSecret: !proxyMode && (!secretId || secretId === settings().emptySecretIds[FORMATS[format].secretKey]),
         extraCredentials,
@@ -3440,8 +4267,10 @@ async function saveChannelConnection(profile, draft) {
         fetchedFromEndpoint: endpointChanged ? '' : profile.fetchedFromEndpoint,
         draft: false,
         updatedAt: new Date().toISOString(),
-    }));
+    });
+    Object.assign(profile, next);
     delete profile.draft;
+    dropStaleKeyPoolFields(profile, next);
     return true;
 }
 
@@ -3551,7 +4380,44 @@ async function manageChannels(initialId = settings().selectedProfileId) {
         for (const option of $('#quicker_api_opencode_format option').toArray()) opencodeSelect.append($('<option>').val(option.value).text(option.textContent));
         if (!opencodeSelect.children().length) opencodeSelect.append($('<option>').val('openai_compat').text('OpenAI Chat'));
         opencodeSelect.val(draft.opencodeApiFormat);
-        const keyInput = $('<input class="text_pole" type="password" autocomplete="new-password" spellcheck="false" data-field="key">').val(draft.key);
+        // One row per key: the saved keys of the channel (read-only, masked by the host), then the keys not saved yet.
+        const keyList = $('<div class="quicker-api__channel-keys" data-role="key-list" role="group" aria-label="API 密钥">');
+        const keyCount = $('<span class="quicker-api__channel-badge quicker-api__channel-key-count" data-role="key-count" title="启用 / 全部" hidden>');
+        const keyAction = (action, icon, title, text = '') => $('<button type="button" class="menu_button">').attr({ 'data-key-action': action, title, 'aria-label': title })
+            .append($('<i>').addClass(`fa-solid ${icon}`), text ? $('<span>').text(text) : null);
+        const keyActions = $('<div class="quicker-api__channel-key-actions">').append(
+            keyAction('add', 'fa-plus', '添加一把密钥', '添加'),
+            keyAction('paste', 'fa-paste', '批量粘贴多把密钥', '批量'),
+            keyAction('reveal', 'fa-eye', '显示/隐藏密钥'),
+            keyAction('copy', 'fa-copy', '复制全部密钥'),
+            keyAction('clear', 'fa-eraser', '清空此渠道的全部密钥（密钥仍保留在酒馆的密钥管理中）'),
+        );
+        const pastePanel = $('<div class="quicker-api__channel-key-paste" data-role="key-paste" hidden>').append(
+            $('<textarea class="text_pole quicker-api__channel-key-paste-input quicker-api__secret-masked" rows="4" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="批量粘贴密钥" placeholder="每行一把，也可用空格、逗号或分号分隔；重复的会自动跳过">'),
+            $('<div class="quicker-api__channel-key-paste-foot">').append(
+                $('<small data-role="paste-count">'),
+                keyAction('paste-cancel', 'fa-xmark', '取消批量粘贴', '取消'),
+                keyAction('paste-add', 'fa-plus', '添加到密钥列表', '添加'),
+            ),
+        );
+        const pasteInput = pastePanel.find('textarea');
+        const pasteCount = pastePanel.find('[data-role="paste-count"]');
+        const strategySelect = $('<select class="text_pole" data-key-strategy aria-label="轮询方式">');
+        for (const [value, config] of Object.entries(KEY_ROTATIONS)) {
+            // TauriTavern does not pass an upstream refusal on to extensions, so a key is never seen to fail there.
+            if (value === 'failover' && platform.isTauriHost && draft.keyStrategy !== 'failover') continue;
+            strategySelect.append($('<option>').val(value).text(config.label).attr('title', config.hint));
+        }
+        // "轮询 ON/OFF" and, next to it, how the keys rotate.
+        const rotation = $('<div class="quicker-api__channel-rotation" data-role="key-rotation" hidden>').append(
+            $('<label class="quicker-api__switch quicker-api__rotation-switch" title="开启后在已启用的密钥之间轮换；关闭则只使用选中的那一把">').append(
+                $('<input class="quicker-api__switch-input" type="checkbox" role="switch" aria-label="轮询" data-key-rotate>'),
+                $('<span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>'),
+                $('<span class="quicker-api__switch-label">').text('轮询'),
+                $('<span class="quicker-api__switch-state" data-role="key-rotate-state" aria-hidden="true">').text('OFF'),
+            ),
+            $('<label class="quicker-api__channel-rotation-mode">').append($('<span>').text('方式'), strategySelect),
+        );
         const field = (label, control, extraClass = '') => $(`<label class="quicker-api__channel-field ${extraClass}">`).append($('<span>').text(label), control);
         const connection = $('<div class="quicker-api__channel-card" data-card="connection">').append(
             $('<h4><i class="fa-solid fa-plug"></i><span>连接</span></h4>'),
@@ -3560,12 +4426,15 @@ async function manageChannels(initialId = settings().selectedProfileId) {
                 field('API 协议', formatSelect),
                 field('API 地址', $('<input class="text_pole" type="url" autocomplete="off" spellcheck="false" maxlength="2048" data-field="endpoint" placeholder="https://example.com/v1">').val(draft.endpoint), 'is-wide'),
                 field('OpenCode 协议', opencodeSelect, 'quicker-api__channel-opencode'),
-                field('API 密钥', $('<div class="quicker-api__channel-key">').append(
-                    keyInput,
-                    $('<button type="button" class="menu_button" data-channel-action="reveal" title="显示/隐藏输入的密钥" aria-label="显示/隐藏输入的密钥"><i class="fa-solid fa-eye"></i></button>'),
-                ), 'is-wide'),
+                // Not a <label>: it holds several controls.
+                $('<div class="quicker-api__channel-field is-wide" data-role="key-field">').append(
+                    $('<div class="quicker-api__channel-key-head">').append($('<span>').text('API 密钥'), keyCount, keyActions),
+                    keyList,
+                    pastePanel,
+                    rotation,
+                ),
             ),
-            // Only what the key input's placeholder cannot say.
+            // What the key list itself cannot say.
             $('<small class="quicker-api__channel-hint" data-role="credential-hint" hidden>'),
         );
         const models = $('<div class="quicker-api__channel-card" data-card="models">');
@@ -3575,20 +4444,270 @@ async function manageChannels(initialId = settings().selectedProfileId) {
         });
         models.append(catalog.element);
 
+        // The saved keys the draft still lists; they show only while the draft stays in their key slot.
+        const savedKeyCount = profile && !profile.draft && !draft.isNew ? connectionStoredKeys(profile).length : 0;
+        const isProxy = () => usesProxyProfile(draft.format, normalizeText(draft.endpoint));
+        const sameSlot = () => Boolean(profile) && credentialSlot(profile.format, profile.endpoint) === credentialSlot(draft.format, normalizeText(draft.endpoint));
+        const shownKeys = () => (savedKeyCount && !isProxy() && sameSlot() ? draft.keys || [] : []);
+        const enabledKeyCount = () => shownKeys().filter(id => !draft.keyDisabled.includes(id)).length + channelTypedRows(draft).filter(row => !row.off).length;
+        // Plain values of saved keys, read only when asked to show or copy them.
+        const plainKeys = new Map();
+        let revealed = false;
+        const readSavedKeys = async () => {
+            const slot = FORMATS[draft.format]?.secretKey;
+            // One at a time: a host that does not allow reading keys is asked only once.
+            for (const id of shownKeys().filter(item => !plainKeys.has(item))) {
+                const value = await findSecretBounded(slot, id);
+                if (value === null) return false;
+                plainKeys.set(id, String(value));
+            }
+            return true;
+        };
+
+        // Number, key, the "current" badge, the switch of the key and its removal.
+        const makeKeyRow = () => $('<div class="quicker-api__channel-key-row">').append(
+            $('<span class="quicker-api__channel-key-index">'),
+            $('<input class="text_pole quicker-api__channel-key-input" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">'),
+            $('<span class="quicker-api__channel-badge is-live" title="酒馆当前正在使用的密钥" hidden><i class="fa-solid fa-circle"></i>当前</span>'),
+            $('<label class="quicker-api__switch is-bare">').append(
+                $('<input class="quicker-api__switch-input" type="checkbox">'),
+                $('<span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>'),
+            ),
+            $('<button type="button" class="menu_button quicker-api__channel-key-remove"><i class="fa-solid fa-trash-can"></i></button>'),
+        );
+
+        const renderKeys = () => {
+            const proxyMode = isProxy();
+            const slot = FORMATS[draft.format]?.secretKey;
+            const shown = shownKeys();
+            // With no key at all there is always one row to type into.
+            if (!shown.length && !draft.keyRows.length) draft.keyRows.push(newChannelKeyRow());
+            const typed = channelTypedRows(draft);
+            const typedRefs = typed.map(row => row.ref);
+            const total = shown.length + typed.length;
+            // Until the switch is set by hand, a channel without a pool starts rotating when several new keys are entered.
+            if (!channelRotationTouched.has(draft) && savedKeyCount < 2) draft.keyRotate = !proxyMode && typed.length > 1;
+            // The key in use is one of the listed keys. Until one is picked by hand a new key takes over;
+            // otherwise it is the saved choice while that is listed, else the first enabled one.
+            const refs = [...shown, ...typedRefs];
+            if (!channelPrimaryTouched.has(draft) && typedRefs.length) {
+                draft.keyPrimary = typedRefs[0];
+            } else if (!refs.includes(draft.keyPrimary)) {
+                const original = profile ? channelKeyDraft(profile).keyPrimary : '';
+                draft.keyPrimary = refs.includes(original) ? original : (refs.find(ref => !draft.keyDisabled.includes(ref)) || refs[0] || '');
+            }
+            const single = proxyMode || !draft.keyRotate;
+            const liveKey = isLive(draft.id) && slot ? getActiveSecret(slot)?.id : '';
+            const placeholder = proxyMode ? (sameSlot() && profile && !profile.draft && !draft.isNew && profileHasCredential(profile, profile.format, profile.endpoint) ? '留空使用已保存凭据' : '代理密码') : '粘贴或输入 API 密钥';
+            const items = [...shown.map(id => ({ ref: id, id, entry: getSecretEntry(slot, id) })), ...draft.keyRows.map(row => ({ ref: row.ref, row }))];
+            // Rows are rebuilt only when the list itself changes, so typing keeps its focus.
+            const current = keyList.children().toArray();
+            if (current.length !== items.length || current.some((element, index) => element.dataset.keyRef !== items[index].ref)) {
+                keyList.empty();
+                items.forEach(() => keyList.append(makeKeyRow()));
+            }
+            keyList.attr('data-mode', single ? 'single' : 'rotate').toggleClass('is-solo', proxyMode || total < 2);
+            // A checked control that joins a radio group unchecks the others: the state is set once every row has its type.
+            const checks = [];
+            keyList.children().each((index, element) => {
+                const item = items[index];
+                const usable = Boolean(item.id) || typedRefs.includes(item.ref);
+                const repeated = !usable && Boolean(normalizeText(item.row.value));
+                const selected = usable && (single ? item.ref === draft.keyPrimary : item.id ? !draft.keyDisabled.includes(item.id) : !item.row.off);
+                const row = $(element).attr({ 'data-key-ref': item.ref, 'data-key-id': item.id || null }).toggleClass('is-off', usable && !selected).toggleClass('is-new', !item.id);
+                row.children('.quicker-api__channel-key-index').text(index + 1).attr('title', item.id ? (normalizeText(item.entry?.label) ? `已保存，在酒馆密钥管理中名为“${normalizeText(item.entry.label)}”` : '已保存的密钥') : '尚未保存');
+                const input = row.children('.quicker-api__channel-key-input');
+                const value = item.id ? ((revealed && plainKeys.get(item.id)) || keyPreview(item.entry?.value) || '*'.repeat(10)) : item.row.value;
+                if (input.val() !== value) input.val(value);
+                input.prop('readOnly', Boolean(item.id)).toggleClass('quicker-api__secret-masked', !item.id && !revealed).attr({
+                    'data-key-value': item.id ? null : item.ref,
+                    placeholder: item.id ? null : placeholder,
+                    'aria-label': `密钥 ${index + 1}`,
+                    title: repeated ? '与前面的密钥重复，保存时会忽略' : null,
+                });
+                row.children('.quicker-api__channel-badge').prop('hidden', !item.id || item.id !== liveKey);
+                const label = single ? '使用这把密钥' : '参与轮询';
+                const toggle = row.find('.quicker-api__switch-input')[0];
+                toggle.checked = false;
+                toggle.type = single ? 'radio' : 'checkbox';
+                toggle.setAttribute('role', single ? 'radio' : 'switch');
+                toggle.name = single ? `quicker_api_channel_key_${draft.id}` : '';
+                toggle.dataset.keyToggle = item.ref;
+                checks.push([toggle, selected]);
+                toggle.disabled = !usable;
+                toggle.setAttribute('aria-label', label);
+                toggle.parentElement.title = label;
+                const removal = item.id ? '从此渠道移除（密钥仍保留在酒馆的密钥管理中）' : '移除这一行';
+                row.children('.quicker-api__channel-key-remove').attr({ 'data-key-remove': item.ref, title: removal, 'aria-label': removal });
+            });
+            for (const [toggle, selected] of checks) toggle.checked = selected;
+            const enabled = single ? Math.min(total, 1) : enabledKeyCount();
+            keyCount.text(`${enabled}/${total}`).prop('hidden', proxyMode || total < 2);
+            const full = total >= KEY_POOL_LIMIT;
+            keyActions.find('[data-key-action="add"], [data-key-action="paste"]').prop('hidden', proxyMode).prop('disabled', full);
+            keyActions.find('[data-key-action="copy"]').prop('hidden', proxyMode).prop('disabled', !total);
+            keyActions.find('[data-key-action="clear"]').prop('hidden', proxyMode).prop('disabled', !total);
+            keyActions.find('[data-key-action="reveal"]').attr('aria-pressed', String(revealed)).children('i').attr('class', revealed ? 'fa-solid fa-eye-slash' : 'fa-solid fa-eye');
+            pasteInput.toggleClass('quicker-api__secret-masked', !revealed);
+            if (proxyMode) pastePanel.prop('hidden', true);
+            rotation.prop('hidden', proxyMode || total < 2);
+            rotation.find('[data-key-rotate]').prop('checked', Boolean(draft.keyRotate));
+            rotation.find('[data-role="key-rotate-state"]').text(draft.keyRotate ? 'ON' : 'OFF');
+            strategySelect.val(draft.keyStrategy).prop('disabled', !draft.keyRotate);
+        };
+
+        // The keys in the paste box that the channel does not list yet, as far as there is room for them.
+        const pastedKeys = () => {
+            const have = new Set(channelTypedRows(draft).map(row => row.value));
+            const all = splitKeyText(pasteInput.val());
+            const fresh = [...new Set(all)].filter(value => !have.has(value)).slice(0, Math.max(0, KEY_POOL_LIMIT - shownKeys().length - have.size));
+            return { all, fresh };
+        };
+        const renderPaste = () => {
+            const { all, fresh } = pastedKeys();
+            const skipped = all.length - fresh.length;
+            pasteCount.text(all.length ? `识别到 ${all.length} 把${skipped ? `，跳过 ${skipped} 把（重复或超出上限）` : ''}` : '');
+            pastePanel.find('[data-key-action="paste-add"]').prop('disabled', !fresh.length).children('span').text(fresh.length ? `添加 ${fresh.length} 把` : '添加');
+        };
+
         const renderCredentialHint = () => {
+            renderKeys();
+            const proxyMode = isProxy();
             const slot = credentialSlot(draft.format, normalizeText(draft.endpoint));
             const saved = profile && !profile.draft && !draft.isNew;
-            const hasOwn = saved && credentialSlot(profile.format, profile.endpoint) === slot && profileHasCredential(profile, profile.format, profile.endpoint);
+            const hasOwn = saved && sameSlot() && profileHasCredential(profile, profile.format, profile.endpoint);
             const extraSlots = [...new Set(profileFormats({ format: draft.format, modelFormats: channelModelFormats(draft) })
                 .map(format => credentialSlot(format, normalizeText(draft.endpoint))).filter(item => item !== slot))];
+            const typed = channelTypedRows(draft);
+            const shown = shownKeys();
+            const total = shown.length + typed.length;
             const parts = [];
-            if (!normalizeText(draft.key) && !hasOwn && saved && profileHasCredential(profile, profile.format, profile.endpoint)) parts.push('协议或地址变更：保存时沿用原密钥（不可读时需重新填写）。');
+            if (!typed.length && !hasOwn && saved && profileHasCredential(profile, profile.format, profile.endpoint)) parts.push('协议或地址变更：保存时沿用原密钥（不可读时需重新填写）。');
             if (extraSlots.length) parts.push(`部分模型的格式另需「${extraSlots.map(credentialSlotLabel).join('、')}」密钥，保存时会写入同一密钥。`);
+            if (typed.length > 1 && proxyMode) {
+                parts.push('当前协议填写了自定义地址时使用反代密码，暂不支持密钥池：请只填写一把密钥。');
+            } else if (!proxyMode && total > 1) {
+                if (typed.length && shown.length) parts.push(`保存时添加 ${typed.length} 把新密钥（共 ${total} 把）。`);
+                parts.push(draft.keyRotate
+                    ? `密钥池：${enabledKeyCount()} 把密钥，${KEY_ROTATIONS[normalizeKeyRotation(draft.keyStrategy)].hint}${platform.isTauriHost ? '。' : '；密钥被上游拒绝（401/403/429）时自动换一把重试。'}`
+                    : '未启用轮询：只使用选中的这一把密钥，其余保留备用。');
+            }
             connection.find('[data-role="credential-hint"]').text(parts.join(' ')).prop('hidden', !parts.length);
-            keyInput.attr('placeholder', hasOwn ? '留空使用已保存凭据' : (usesProxyProfile(draft.format, normalizeText(draft.endpoint)) ? '代理密码' : 'API Key'));
             connection.find('.quicker-api__channel-opencode').prop('hidden', draft.format !== 'opencode');
         };
         renderCredentialHint();
+
+        const keysChanged = () => {
+            syncChannelKeyText(draft);
+            catalog?.refreshFetchState();
+            renderCredentialHint();
+            refreshChrome();
+        };
+        // Focuses the first empty row, adding one when there is none.
+        const addKeyRow = () => {
+            let row = draft.keyRows.find(item => !normalizeText(item.value));
+            if (!row) {
+                if (isProxy() || shownKeys().length + channelTypedRows(draft).length >= KEY_POOL_LIMIT) return;
+                row = newChannelKeyRow();
+                draft.keyRows.push(row);
+                keysChanged();
+            }
+            keyList.find('[data-key-value]').filter((_, element) => element.dataset.keyValue === row.ref).trigger('focus');
+        };
+        const openPaste = (text = null) => {
+            if (text !== null) pasteInput.val(text);
+            pastePanel.prop('hidden', false);
+            renderPaste();
+            pasteInput.trigger('focus');
+        };
+        const closePaste = () => {
+            pasteInput.val('');
+            pastePanel.prop('hidden', true);
+        };
+
+        connection.on('click', '[data-key-action]', async function () {
+            const action = this.dataset.keyAction;
+            if (action === 'add') return addKeyRow();
+            if (action === 'paste') return isProxy() ? undefined : pastePanel.prop('hidden') ? openPaste() : closePaste();
+            if (action === 'paste-cancel') return closePaste();
+            if (action === 'paste-add') {
+                const { fresh } = pastedKeys();
+                if (!fresh.length) return;
+                draft.keyRows = [...draft.keyRows.filter(row => normalizeText(row.value)), ...fresh.map(value => newChannelKeyRow(value))];
+                closePaste();
+                return keysChanged();
+            }
+            if (action === 'clear') {
+                const shown = shownKeys();
+                draft.keys = draft.keys.filter(id => !shown.includes(id));
+                draft.keyDisabled = draft.keyDisabled.filter(id => !shown.includes(id));
+                draft.keyRows = [];
+                closePaste();
+                return keysChanged();
+            }
+            if (action === 'reveal') {
+                // Keys not saved yet are shown either way; saved ones need the host to allow reading them.
+                if (!revealed && !await readSavedKeys()) {
+                    toastr.warning(keyExposureGuidance().warning);
+                    if (!draft.keyRows.some(row => normalizeText(row.value))) return;
+                }
+                if (!connection[0].isConnected) return;
+                revealed = !revealed;
+                return renderKeys();
+            }
+            if (action === 'copy') {
+                if (!await readSavedKeys()) return toastr.warning(keyExposureGuidance().warning);
+                const values = [...new Set([...shownKeys().map(id => plainKeys.get(id)), ...channelTypedRows(draft).map(row => row.value)].filter(Boolean))];
+                if (values.length) await copyToClipboard(values.join('\n'), `已复制 ${values.length} 把密钥。`);
+            }
+        }).on('input', '[data-key-value]', function () {
+            const row = draft.keyRows.find(item => item.ref === this.dataset.keyValue);
+            if (!row) return;
+            row.value = String(this.value);
+            keysChanged();
+        }).on('paste', '[data-key-value]', function (event) {
+            // Several keys pasted into one row go through the paste box instead.
+            const text = (event.originalEvent || event).clipboardData?.getData('text') || '';
+            if (isProxy() || splitKeyText(text).length < 2) return;
+            event.preventDefault();
+            openPaste(text);
+        }).on('keydown', '[data-key-value]', event => {
+            // Enter moves on to the next key.
+            if (event.key === 'Enter' && !event.originalEvent?.isComposing) addKeyRow();
+        }).on('input', '.quicker-api__channel-key-paste-input', renderPaste).on('change', '[data-key-toggle]', function () {
+            const ref = this.dataset.keyToggle;
+            const row = draft.keyRows.find(item => item.ref === ref);
+            if (!draft.keyRotate) {
+                channelPrimaryTouched.add(draft);
+                draft.keyPrimary = ref;
+            } else if (!this.checked && enabledKeyCount() <= 1) {
+                this.checked = true;
+                toastr.info('轮询至少需要保留一把启用的密钥。');
+                return;
+            } else if (row) {
+                row.off = !this.checked;
+            } else {
+                draft.keyDisabled = this.checked ? draft.keyDisabled.filter(item => item !== ref) : [...draft.keyDisabled, ref];
+            }
+            keysChanged();
+        }).on('click', '[data-key-remove]', function () {
+            const ref = this.dataset.keyRemove;
+            draft.keyRows = draft.keyRows.filter(item => item.ref !== ref);
+            draft.keys = draft.keys.filter(item => item !== ref);
+            draft.keyDisabled = draft.keyDisabled.filter(item => item !== ref);
+            keysChanged();
+        }).on('change', '[data-key-rotate]', function () {
+            channelRotationTouched.add(draft);
+            draft.keyRotate = this.checked;
+            // The key in use is always an enabled one.
+            if (!draft.keyRotate && draft.keyDisabled.includes(draft.keyPrimary)) {
+                draft.keyPrimary = shownKeys().find(item => !draft.keyDisabled.includes(item)) || draft.keyPrimary;
+            }
+            keysChanged();
+        }).on('change', '[data-key-strategy]', function () {
+            draft.keyStrategy = normalizeKeyRotation(this.value);
+            keysChanged();
+        });
 
         connection.on('input change', '[data-field]', function () {
             const name = this.dataset.field;
@@ -3600,7 +4719,7 @@ async function manageChannels(initialId = settings().selectedProfileId) {
                 }
                 catalog?.refreshFormats();
             }
-            if (name === 'endpoint' || name === 'format' || name === 'opencodeApiFormat' || name === 'key') catalog?.refreshFetchState();
+            if (name === 'endpoint' || name === 'format' || name === 'opencodeApiFormat') catalog?.refreshFetchState();
             renderCredentialHint();
             refreshChrome();
         }).on('keydown', 'input', event => {
@@ -3608,6 +4727,9 @@ async function manageChannels(initialId = settings().selectedProfileId) {
                 event.preventDefault();
                 event.stopPropagation(); // Host Popup treats Enter as confirmation.
             }
+        }).on('keydown', 'textarea', event => {
+            // Enter starts the next pasted key; the host Popup must not see it as confirmation.
+            if (event.key === 'Enter') event.stopPropagation();
         });
     };
 
@@ -3624,13 +4746,6 @@ async function manageChannels(initialId = settings().selectedProfileId) {
     content.on('click', '[data-channel-action]', async function () {
         const action = this.dataset.channelAction;
         if (action === 'back') return content.attr('data-view', 'list');
-        if (action === 'reveal') {
-            const input = detail.find('[data-field="key"]');
-            const show = input.attr('type') === 'password';
-            input.attr('type', show ? 'text' : 'password');
-            $(this).find('i').attr('class', show ? 'fa-solid fa-eye-slash' : 'fa-solid fa-eye');
-            return;
-        }
         if (action === 'new') {
             const used = new Set([...drafts.values()].filter(draft => !draft.deleted).map(draft => draft.name.toLocaleLowerCase()));
             let index = drafts.size + 1;
@@ -3709,6 +4824,8 @@ async function manageChannels(initialId = settings().selectedProfileId) {
                         scheduleSettingsSave();
                         return false;
                     }
+                    // The new keys are saved keys now: a later attempt must not write them again.
+                    Object.assign(draft, { key: '', ...channelKeyDraft(profile) });
                     if (!profiles().includes(profile)) profiles().push(profile);
                     if (profile === liveBefore) reapply = true;
                 } else {
@@ -4264,7 +5381,7 @@ function presetOptionsHtml(selected = '') {
     const missing = selected && !names.includes(selected)
         ? [`<option value="${escapeHtml(selected)}" selected>⚠ 已不存在：${escapeHtml(selected)}</option>`]
         : [];
-    return ['<option value="">— 不切换 preset —</option>', ...missing, ...names.map(name =>
+    return ['<option value="">— 不切换预设 —</option>', ...missing, ...names.map(name =>
         `<option value="${escapeHtml(name)}"${name === selected ? ' selected' : ''}>${escapeHtml(name)}</option>`,
     )].join('');
 }
@@ -4272,9 +5389,9 @@ function presetOptionsHtml(selected = '') {
 function profileOptionsHtml(selected = '') {
     const exists = profiles().some(profile => profile.id === selected);
     const missing = selected && !exists
-        ? [`<option value="${escapeHtml(selected)}" selected>⚠ Profile 已不存在</option>`]
+        ? [`<option value="${escapeHtml(selected)}" selected>⚠ 配置已不存在</option>`]
         : [];
-    return ['<option value="">— 不切换 Profile —</option>', ...missing, ...profiles().filter(profile => !profile.draft || profile.id === selected).map(profile =>
+    return ['<option value="">— 不切换配置 —</option>', ...missing, ...profiles().filter(profile => !profile.draft || profile.id === selected).map(profile =>
         `<option value="${escapeHtml(profile.id)}"${profile.id === selected ? ' selected' : ''}>${escapeHtml(profile.name)}</option>`,
     )].join('');
 }
@@ -4428,7 +5545,7 @@ async function manageQuickActions() {
         closeModelPicker({ host: quickModelPicker });
         editor.empty().removeClass('has-unsaved-detail');
         if (!detailDraft) {
-            editor.append($('<div class="quicker-api__empty-state">').text('新增方案后，可自由组合 preset、Profile 与 model。'));
+            editor.append($('<div class="quicker-api__empty-state">').text('新增方案后，可自由组合预设、配置与模型。'));
             return;
         }
         const name = $('<input class="text_pole" type="text" maxlength="120" placeholder="留空自动命名为方案N">').val(detailDraft.name);
@@ -4461,7 +5578,7 @@ async function manageQuickActions() {
         const saveScheme = $('<button type="button" class="menu_button quicker-api__save-button"><i class="fa-solid fa-floppy-disk"></i><span>保存方案</span></button>');
         const cancelScheme = $('<button type="button" class="menu_button"><span>取消</span></button>');
         saveScheme.on('click', () => {
-            if (!detailDraft.preset && !detailDraft.profileId && !detailDraft.model) return toastr.warning('方案至少需要 preset、Profile 或 model 中的一项。');
+            if (!detailDraft.preset && !detailDraft.profileId && !detailDraft.model) return toastr.warning('方案至少需要预设、配置或模型中的一项。');
             // Only the scheme being confirmed is validated; other schemes keep
             // their (possibly stale) references and are flagged in the list.
             const problems = quickActionProblems(detailDraft);
@@ -4541,7 +5658,7 @@ async function manageQuickActions() {
     saveAll.on('click', async () => {
         if (detailDraft && JSON.stringify(detailDraft) !== detailBaseline) return toastr.warning('当前方案还有未确认的修改，请先点击“保存方案”或“取消”。');
         const invalid = globalDraft.find(action => !action.preset && !action.profileId && !action.model);
-        if (invalid) return toastr.warning('请先点击“保存方案”确认每个方案；每项至少需要 preset、Profile 或 model。');
+        if (invalid) return toastr.warning('请先点击“保存方案”确认每个方案；每项至少需要预设、配置或模型。');
         const broken = globalDraft.filter(action => quickActionProblems(action).length).length;
         globalDraft.forEach((action, index) => {
             action.name = sanitizeName(action.name) || `方案${index + 1}`;
@@ -4603,7 +5720,7 @@ function applyExplicitModel(model, preferredFormat = '') {
             input.val(value).trigger('input');
         } else {
             if (!input.find('option').filter((_, option) => option.value === value).length) {
-                input.append($('<option data-quicker-api-custom="true">').val(value).text(`${value} (Custom)`));
+                input.append($('<option data-quicker-api-custom="true">').val(value).text(`${value}（自定义）`));
             }
             input.val(value).trigger('change');
             oai_settings[config.modelField] = value;
@@ -4631,7 +5748,7 @@ function waitForPresetAfter(expectedName, token) {
         };
         const warningTimer = setTimeout(() => {
             if (!settled && token === quickActionTransaction) {
-                toastr.warning('Preset 仍在应用或回滚中；为避免凭据错配，生成保持阻断。后续便捷方案会在本次事务完成后执行。');
+                toastr.warning('预设仍在应用或回滚中；为避免凭据错配，生成保持阻断。后续便捷方案会在本次事务完成后执行。');
             }
         }, 30000);
         quickPresetWaitCancel = cancel;
@@ -4677,7 +5794,7 @@ async function runQuickAction(action, token) {
     quickActionBlockingToken = token;
     try {
         if (action.preset && !await selectPresetForQuickAction(action.preset, token)) {
-            if (token === quickActionTransaction) toastr.error('便捷方案的 preset 不存在或切换未完成。');
+            if (token === quickActionTransaction) toastr.error('便捷方案的预设不存在或切换未完成。');
             return;
         }
         if (token !== quickActionTransaction) return;
@@ -4688,7 +5805,7 @@ async function runQuickAction(action, token) {
             // per-model format and credential are used.
             const options = action.model ? { model: action.model, manageTransition: false } : { applyModel: !action.preset, manageTransition: false };
             if (!profile || !await applyProfileById(action.profileId, token, options)) {
-                if (token === quickActionTransaction) toastr.error('便捷方案的 Profile 未能安全应用。');
+                if (token === quickActionTransaction) toastr.error('便捷方案的配置未能安全应用。');
                 return;
             }
         }
@@ -4760,25 +5877,100 @@ function closeQuickActionMenu() {
     $(globalThis.visualViewport).off('.quickerApiMenu');
 }
 
+// The quick entry menu has two contents the user switches between at its top;
+// the choice is remembered. Schemes are untouched by the model list.
+const QUICK_MENU_MODES = Object.freeze([
+    { value: 'schemes', label: '方案', title: '便捷方案：预设、配置与模型的组合' },
+    { value: 'models', label: '模型', title: '快速选模型：所有渠道的收藏模型' },
+]);
+
+function normalizeQuickMenuMode(value) {
+    return value === 'models' ? 'models' : 'schemes';
+}
+
+// The menu's head row: what the menu lists (schemes / models) on the left, the
+// manager behind a gear on the right.
+function quickMenuHead(mode, anchor, placement) {
+    const modes = $('<div class="quicker-api__quick-modes" role="group" aria-label="菜单内容">');
+    for (const option of QUICK_MENU_MODES) {
+        modes.append($('<button type="button" class="quicker-api__quick-mode" data-quicker-api-actionable="true">')
+            .attr({ 'data-quick-mode': option.value, 'aria-pressed': String(option.value === mode), title: option.title })
+            .toggleClass('is-selected', option.value === mode)
+            .text(option.label)
+            .on('click', () => {
+                if (option.value === mode) return;
+                settings().quickMenuMode = option.value;
+                scheduleSettingsSave();
+                closeQuickActionMenu();
+                openQuickActionMenu(anchor, placement);
+                quickActionMenu?.find('.quicker-api__quick-mode.is-selected').trigger('focus');
+            }));
+    }
+    return $('<li class="list-group-item ctx-header quicker-api__quick-head" role="listitem">').append(
+        modes,
+        $('<button type="button" class="quicker-api__quick-manage" data-quicker-api-actionable="true" title="便捷按钮管理" aria-label="便捷按钮管理"><i class="fa-solid fa-gear" aria-hidden="true"></i></button>')
+            .on('click', () => { closeQuickActionMenu(); void manageQuickActions(); }),
+    );
+}
+
+// Picking a model in the quick menu is a one-off scheme of that channel and
+// model: it goes through the same queue and credential checks as a scheme,
+// switches no preset and carries no parameter overrides of its own.
+function queueQuickModel(profileId, model) {
+    const profile = profiles().find(item => item.id === profileId);
+    if (!profile) return quickActionQueue;
+    return queueQuickAction({ ...normalizeQuickAction({ name: `${profile.name} · ${model}`, profileId, model }), id: '' });
+}
+
+function appendQuickMenuModels(menu) {
+    const channels = profiles()
+        .filter(profile => !profile.draft && isFormatSupported(profile.format) && normalizeModelList(profile.availableModels).length)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    if (!channels.length) {
+        menu.append($('<li class="list-group-item ctx-item quicker-api__quick-menu-empty" role="listitem" aria-disabled="true">').append(
+            $('<div class="qr--button-icon fa-solid qr--hidden">'),
+            $('<div class="qr--button-label">').text('暂无收藏模型'),
+        ));
+        return;
+    }
+    for (const profile of channels) {
+        const live = settings().activeProfileId === profile.id && profileMatchesNative(profile, { includeModel: false });
+        const format = live ? liveFormat(profile) : null;
+        const liveModel = format ? nativeModelFor(format) : '';
+        menu.append($('<li class="list-group-item ctx-header quicker-api__quick-group" role="presentation">').toggleClass('is-current', live)
+            .append($('<span>').text(profile.name), $('<small>').text(formatShortLabel(profile.format))));
+        for (const model of normalizeModelList(profile.availableModels)) {
+            const inUse = live && model === liveModel;
+            const name = `${profile.name} · ${model}`;
+            menu.append($('<li class="list-group-item ctx-item quicker-api__quick-model" role="listitem" tabindex="0" data-quicker-api-actionable="true">')
+                .toggleClass('is-active', inUse)
+                .attr({ title: inUse ? `${name}（当前正在使用）` : name, 'aria-current': inUse ? 'true' : null, 'data-profile-id': profile.id, 'data-model': model })
+                .append(
+                    $('<div class="qr--button-icon fa-solid fa-check">').toggleClass('qr--hidden', !inUse),
+                    $('<div class="qr--button-label">').text(model),
+                    modelFormatTag(profile, model),
+                )
+                .on('click', () => { closeQuickActionMenu(); void queueQuickModel(profile.id, model); }));
+        }
+    }
+}
+
 function openQuickActionMenu(anchor, placement) {
     if (quickActionMenu?.data('anchor') === anchor) return closeQuickActionMenu();
     closeQuickActionMenu();
     const actions = [...settings().quickActions].sort((a, b) => a.sequence - b.sequence);
     const current = activeQuickAction();
-    const menu = $('<ul class="list-group ctx-menu quicker-api__quick-menu" role="list" tabindex="-1">').data('anchor', anchor).appendTo(document.body);
+    const mode = normalizeQuickMenuMode(settings().quickMenuMode);
+    const menu = $('<ul class="list-group ctx-menu quicker-api__quick-menu" role="list" tabindex="-1">').toggleClass('is-models', mode === 'models')
+        .data('anchor', anchor).appendTo(document.body);
     quickActionMenu = menu;
-    const settingsItem = $('<li class="list-group-item ctx-header quicker-api__quick-manage" role="listitem" tabindex="0" data-quicker-api-actionable="true" title="便捷按钮管理">')
-        .append(
-            $('<div class="qr--button-icon fa-solid fa-gear">'),
-            $('<div class="qr--button-label">').text('设置'),
-        )
-        .on('click', () => { closeQuickActionMenu(); void manageQuickActions(); });
-    menu.append(settingsItem);
-    if (!actions.length) menu.append($('<li class="list-group-item ctx-item quicker-api__quick-menu-empty" role="listitem" aria-disabled="true">').append(
+    menu.append(quickMenuHead(mode, anchor, placement));
+    if (mode === 'models') appendQuickMenuModels(menu);
+    else if (!actions.length) menu.append($('<li class="list-group-item ctx-item quicker-api__quick-menu-empty" role="listitem" aria-disabled="true">').append(
         $('<div class="qr--button-icon fa-solid qr--hidden">'),
         $('<div class="qr--button-label">').text('暂无方案'),
     ));
-    actions.forEach((action, index) => {
+    if (mode !== 'models') actions.forEach((action, index) => {
         const name = quickActionDisplayName(action, index);
         const inUse = action === current;
         const broken = quickActionProblems(action).length > 0;
@@ -4967,14 +6159,14 @@ async function applyNativePresetChange() {
                 editorModelBaseline = getEditorModel(format);
                 updateCredentialEditor(settings().activeProfileId === selected?.id ? selected : null);
             }
-            setStatus('当前 preset 未绑定。', 'warning');
+            setStatus('当前预设未绑定。', 'warning');
             return false;
         }
         return await enqueueOperation(async () => {
             if (generation !== profileSelectionGeneration) return false;
             const applied = await applyProfile(profile, generation, true, false);
             if (applied) restoreBoundPresetModel(presetName, profile);
-            else setStatus('所选 Profile 未应用。', 'warning');
+            else setStatus('所选配置未应用。', 'warning');
             return applied;
         });
     } finally {
@@ -5115,6 +6307,11 @@ function installPresetSaveObserver() {
             if (settingsObservation) finishSettingsSave(settingsObservation.snapshot, false);
             throw error;
         }
+        // A refused key of a pooled Profile: resend the identical request with
+        // the next key. The request itself is still never modified.
+        if (method === 'POST' && path === GENERATE_PATH && typeof options?.body === 'string' && !extensionDisabled && !teardownPending) {
+            response = await failoverGeneration(response, options, () => stableFetchDelegate.call(this, resource, options));
+        }
         if (settingsObservation) {
             const success = await settingsObservation.succeeded(response);
             if (settingsSequence >= confirmedSettingsSequence) {
@@ -5156,7 +6353,7 @@ function captureNativePresetSave(event, type) {
         || (profile.format === 'opencode' && $('#quicker_api_opencode_format').val() !== profile.opencodeApiFormat)
         || normalizeText($('#quicker_api_url').val()) !== normalizeText(profile.endpoint)
         || (keyEditorDirty && normalizeText($('#quicker_api_key_input').val()))) {
-        return stop('URL、Key 或格式有未保存修改，请先点击 Quicker Api 的“保存 API 设置”。仅切换模型无需这一步。');
+        return stop('URL、密钥或格式有未保存修改，请先点击 Quicker Api 的“保存 API 设置”。仅切换模型无需这一步。');
     }
     // Native saveOpenAIPreset snapshots oai_settings synchronously in its click
     // handler. Synchronize BEFORE that handler, not after observing its fetch.
@@ -5244,6 +6441,7 @@ function bindEvents() {
     $('#quicker_api_rename').on('click', renameSelectedProfile);
     $('#quicker_api_copy').on('click', copySelectedProfile);
     $('#quicker_api_import_native').on('click', () => void enqueueOperation(importNativeProfile));
+    $('#quicker_api_backup').on('click', () => void manageBackup());
     $('#quicker_api_delete').on('click', deleteSelectedProfile);
     $('#quicker_api_reveal_key').on('click', () => void enqueueOperation(revealBoundSecret));
     $('#quicker_api_copy_key').on('click', () => void enqueueOperation(copyBoundSecret));
@@ -5309,7 +6507,7 @@ function configureAdditionalParametersPopup() {
         .closest('.flex1.flex-container.flexFlowColumn')
         .hide();
     $('<small class="quicker-api__exclude-only-hint">')
-        .text('这些顶层字段会在请求发送前移除，适用于当前 Anthropic / Gemini Profile。')
+        .text('这些顶层字段会在请求发送前移除，适用于当前 Anthropic / Gemini 配置。')
         .insertBefore($(excludeInput).closest('.flex1.flex-container.flexFlowColumn'));
 }
 
@@ -5379,7 +6577,7 @@ async function restoreInitialProfileSelection() {
         const keepLiveModel = profileMatchesNative(target, { includeModel: false }) && Boolean(nativeModelFor(target.format));
         const applied = await applyProfile(target, generation, true, !isBound && !keepLiveModel);
         if (applied && isBound && !keepLiveModel) restoreBoundPresetModel(currentPreset, target);
-        if (!applied) renderStatus('所选 Profile 未应用。');
+        if (!applied) renderStatus('所选配置未应用。');
     } finally {
         endPresetTransition();
     }

@@ -347,5 +347,32 @@ export async function runModelPickerRegressions({ page, log, setViewport }) {
     }
     await run(`document.getElementById('quicker_api_model_trigger').style.transform=''; document.body.style.filter=''; document.body.style.marginTop=''; true`);
     log('on phones the dropdown stays fully visible and attached to the trigger near the top and bottom, even with a shifted fixed-position host');
+
+    // 8. Phones: the on-screen keyboard shrinks the viewport while the search box is focused and can
+    // cover the trigger. Closing the dropdown then would drop the focus and dismiss the keyboard again.
+    await setViewport(360, 640);
+    await run(`(() => { const control=document.getElementById('quicker_api_model_trigger'); control.style.transform='';
+        const r=control.getBoundingClientRect(); control.style.transform='translateY(' + (560 - r.top) + 'px)'; return true; })()`);
+    await open();
+    await run(`document.querySelector('#quicker_api_model_dropdown .quicker-api__model-search-input').focus(); true`);
+    const settle = () => new Promise(resolve => setTimeout(resolve, 300));
+    const keyboardState = () => run(`(() => {
+        const d=document.getElementById('quicker_api_model_dropdown'); const input=d.querySelector('.quicker-api__model-search-input');
+        const r=d.getBoundingClientRect(); const i=input.getBoundingClientRect(); const t=document.getElementById('quicker_api_model_trigger').getBoundingClientRect();
+        return { open: !d.hidden && document.getElementById('quicker_api_model_picker').classList.contains('is-open'), focused: document.activeElement===input,
+            visible: !d.hidden && r.top>=0 && r.bottom<=innerHeight+0.5 && i.top>=0 && i.bottom<=innerHeight+0.5 && r.height>=80,
+            triggerCovered: t.top>innerHeight, trigger:[Math.round(t.top),Math.round(t.bottom)], dropdown:[Math.round(r.top),Math.round(r.bottom)], height: innerHeight }; })()`);
+    await setViewport(360, 330);
+    await settle();
+    let keyboard = await keyboardState();
+    assert.equal(keyboard.triggerCovered, true, `the emulated keyboard covers the trigger: ${JSON.stringify(keyboard)}`);
+    assert.deepEqual({ open: keyboard.open, focused: keyboard.focused, visible: keyboard.visible }, { open: true, focused: true, visible: true }, JSON.stringify(keyboard));
+    await run(`document.activeElement.blur(); window.dispatchEvent(new Event('resize')); true`);
+    await settle();
+    keyboard = await keyboardState();
+    assert.equal(keyboard.open, false, `without the search focus a trigger out of view still closes the dropdown: ${JSON.stringify(keyboard)}`);
+    await setViewport(360, 640);
+    await run(`document.getElementById('quicker_api_model_trigger').style.transform=''; true`);
+    log('on phones the on-screen keyboard covering the trigger keeps the dropdown open, focused and inside the visible area; without the search focus it still closes');
     await run('teardownQuickerApi()');
 }

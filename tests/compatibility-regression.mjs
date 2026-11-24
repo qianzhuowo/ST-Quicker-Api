@@ -188,6 +188,13 @@ export async function runCompatibilityRegressions({ page, scopedHost, log }) {
     assert.notEqual(await run('compatSecrets.api_key_custom.find(e=>e.active).id'), 'bound');
     log('a slot without an original active credential returns to a verified empty key');
 
+    // A URL that already names an API route is reduced to its base before /models is appended.
+    const modelUrls = await run(`['https://m.invalid/v1', 'https://m.invalid/v1/', 'https://m.invalid/v1/models', 'https://m.invalid/v1/models/',
+        'https://m.invalid/v1/chat/completions', 'https://m.invalid/v1/chat/completions/', 'https://m.invalid/v1/responses', 'https://m.invalid/v1/MODELS?x=1#y',
+        'https://m.invalid', 'https://m.invalid/models', 'https://m.invalid/v1/models-proxy'].map(buildModelsEndpoint)`);
+    assert.deepEqual(modelUrls, [...Array(8).fill('https://m.invalid/v1/models'), 'https://m.invalid/models', 'https://m.invalid/models', 'https://m.invalid/v1/models-proxy/models']);
+    log('the model list URL never becomes /models/models: a trailing /models, /chat/completions or /responses is reduced to the base first');
+
     if (scopedHost) {
         assert.equal(await run(`findSecretBounded('api_key_custom','bound')`), null);
         await run(`(async()=>{ await readAuthoritativeSecretState(); return await ensureSecret('api_key_custom','new-synthetic-key','test'); })()`);

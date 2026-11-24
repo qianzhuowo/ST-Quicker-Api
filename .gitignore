@@ -26,6 +26,10 @@ build/
 out/
 .cache/
 *.tgz
+*.zip
+*.bak
+*.tmp
+*.orig
 
 # 本机运行时与密钥
 .env
@@ -34,6 +38,8 @@ out/
 *.secret
 tauritavern-runtime.json
 secrets.json
+# 插件导出的备份文件（可能含密钥明文）
+quicker-api-backup-*.json
 
 # 系统与编辑器文件
 .DS_Store
@@ -41,5 +47,8 @@ Thumbs.db
 Desktop.ini
 .vscode/
 .idea/
+.cursor/
+.claude/
+.limcode/
 *.swp
 *~

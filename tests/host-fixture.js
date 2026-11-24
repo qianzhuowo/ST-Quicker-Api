@@ -71,6 +71,9 @@ async function saveSettings() {
 let saveTimer;
 function saveSettingsDebounced() { clearTimeout(saveTimer); saveTimer = setTimeout(() => void saveSettings(), 80); }
 function cancelDebounce() { clearTimeout(saveTimer); }
+// Stands in for the host's utils.js download(): records the file instead of saving it.
+const fixtureDownloads = [];
+function download(content, fileName, contentType) { fixtureDownloads.push({ content: String(content), fileName, contentType }); }
 const settingsHost = { saveSettingsDebounced, ...(scopedHost ? { cancelPendingSettingsSave: () => cancelDebounce() } : {}) };
 const POPUP_TYPE = { DISPLAY: 4, INPUT: 3, CONFIRM: 1 };
 class Popup {

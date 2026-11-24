@@ -778,6 +778,44 @@
     max-height: 44vh;
 }
 
+.quicker-api__backup {
+    width: min(92vw, 42rem);
+    gap: 0.9rem;
+}
+
+.quicker-api__backup-section,
+.quicker-api__backup-preview {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    width: 100%;
+}
+
+.quicker-api__backup-section + .quicker-api__backup-section {
+    padding-top: 0.9rem;
+    border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 75%, transparent);
+}
+
+.quicker-api__backup .quicker-api__manager-note,
+.quicker-api__backup .quicker-api__model-list {
+    align-self: stretch;
+}
+
+.quicker-api__backup .quicker-api__model-list {
+    max-height: 34vh;
+}
+
+.quicker-api__backup-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1rem;
+}
+
+.quicker-api__backup-error {
+    color: var(--quicker-api-danger, #ff4f5e);
+}
+
 dialog.popup:has(.quicker-api__model-manager) .popup-controls {
     gap: 0.55rem;
 }
@@ -985,7 +1023,7 @@ dialog.popup:has(.quicker-api__model-manager) .popup-controls .menu_button:focus
 .quicker-api__quick-menu {
     z-index: 10050;
     width: max-content;
-    min-width: 9rem;
+    min-width: 11rem;
     max-width: min(18rem, calc(100vw - 1rem));
     max-height: min(28rem, calc(100vh - 1rem));
     margin: 0;
@@ -1041,9 +1079,110 @@ dialog.popup:has(.quicker-api__model-manager) .popup-controls .menu_button:focus
     opacity: 0.7;
 }
 
-.quicker-api__quick-manage {
+/* Quick menu head row: the content switch (schemes / models) on the left, the
+   manager behind a gear on the right. */
+.quicker-api__quick-menu.is-models {
+    max-width: min(24rem, calc(100vw - 1rem));
+}
+
+.quicker-api__quick-menu > .quicker-api__quick-head {
+    justify-content: space-between;
+    column-gap: 8px;
+    padding: 5px 6px;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.quicker-api__quick-modes {
+    display: inline-flex;
+    flex: 0 0 auto;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 999px;
+}
+
+.quicker-api__quick-mode,
+.quicker-api__quick-manage {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: 1.4;
+    white-space: nowrap;
+    cursor: pointer;
+    opacity: 0.7;
+}
+
+.quicker-api__quick-mode {
+    padding: 2px 12px;
+    border-radius: 999px;
+}
+
+.quicker-api__quick-manage {
+    width: 1.9rem;
+    height: 1.9rem;
+    padding: 0;
+    border-radius: 50%;
+}
+
+.quicker-api__quick-mode:hover,
+.quicker-api__quick-manage:hover {
+    opacity: 1;
+}
+
+.quicker-api__quick-manage:hover {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 12%, transparent);
+}
+
+.quicker-api__quick-mode.is-selected {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 22%, transparent);
     font-weight: 700;
+    opacity: 1;
+}
+
+.quicker-api__quick-mode:focus-visible,
+.quicker-api__quick-manage:focus-visible {
+    outline: 1px solid var(--SmartThemeQuoteColor);
+    outline-offset: 1px;
+    opacity: 1;
+}
+
+.quicker-api__quick-menu > .quicker-api__quick-group {
+    justify-content: space-between;
+    font-size: 0.85em;
+    opacity: 0.75;
+}
+
+/* The channel name stays on one line and is cut with an ellipsis; it never wraps letter by letter. */
+.quicker-api__quick-menu > .quicker-api__quick-group > span {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    word-break: normal;
+    overflow-wrap: normal;
+    writing-mode: horizontal-tb;
+}
+
+.quicker-api__quick-menu > .quicker-api__quick-group > small {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.quicker-api__quick-menu > .quicker-api__quick-group.is-current {
+    color: var(--SmartThemeQuoteColor);
+    opacity: 1;
+}
+
+.quicker-api__quick-menu .quicker-api__model-format-tag {
+    flex: 0 0 auto;
+    margin-left: auto;
 }
 
 dialog.popup:has(.quicker-api__quick-manager) {
@@ -2485,13 +2624,268 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     margin: 0;
 }
 
-.quicker-api__channel-key {
+/* The keys of a channel: a title row with the actions, one row per key, the
+   bulk paste box and the rotation switch. */
+.quicker-api__channels .menu_button[hidden],
+.quicker-api__channel-badge[hidden],
+.quicker-api__channel-key-paste[hidden],
+.quicker-api__channel-rotation[hidden] {
+    display: none;
+}
+
+.quicker-api__channel-key-head {
     display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.5rem;
+}
+
+.quicker-api__channel-key-head > span:first-child {
+    font-size: 0.82em;
+    opacity: 0.7;
+}
+
+.quicker-api__channel-key-count {
+    padding: 0 0.45rem;
+    font-size: 0.75em;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.85;
+}
+
+.quicker-api__channel-key-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: auto;
+}
+
+.quicker-api__channel-key-actions > .menu_button,
+.quicker-api__channel-key-paste-foot > .menu_button,
+.quicker-api__channel-key-row > .menu_button {
+    width: auto;
+    min-width: 0;
+    min-height: 1.8rem;
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    font-size: 0.85em;
+}
+
+.quicker-api__channel-key-actions > .menu_button:disabled,
+.quicker-api__channel-key-paste-foot > .menu_button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.quicker-api__channel-key-actions > .menu_button[aria-pressed='true'] {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 70%, var(--SmartThemeBorderColor));
+    color: var(--SmartThemeQuoteColor);
+}
+
+.quicker-api__channel-key-actions > .menu_button[data-key-action='add'],
+.quicker-api__channel-key-paste-foot > .menu_button[data-key-action='paste-add'] {
+    border-color: color-mix(in srgb, var(--quicker-api-success) 60%, var(--SmartThemeBorderColor));
+    color: var(--quicker-api-success);
+}
+
+.quicker-api__channel-key-actions > .menu_button[data-key-action='clear']:not(:disabled):hover,
+.quicker-api__channel-key-row > .quicker-api__channel-key-remove:hover {
+    border-color: color-mix(in srgb, var(--quicker-api-danger) 65%, var(--SmartThemeBorderColor));
+    color: var(--quicker-api-danger);
+}
+
+.quicker-api__channel-keys {
+    display: flex;
+    max-height: 15rem;
+    flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 55%, transparent);
+}
+
+.quicker-api__channel-key-row {
+    display: flex;
+    min-width: 0;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.3rem 0.45rem;
+}
+
+.quicker-api__channel-key-row + .quicker-api__channel-key-row {
+    border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 60%, transparent);
+}
+
+.quicker-api__channel-key-index {
+    min-width: 1.5rem;
+    flex: 0 0 auto;
+    font-size: 0.8em;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    opacity: 0.6;
+}
+
+.quicker-api__channel-key-row.is-new > .quicker-api__channel-key-index {
+    color: var(--quicker-api-success);
+    opacity: 0.9;
+}
+
+.quicker-api__channel-field .quicker-api__channel-key-row > .quicker-api__channel-key-input {
+    width: auto;
+    min-width: 0;
+    min-height: 1.9rem;
+    flex: 1 1 0;
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.9em;
+    text-overflow: ellipsis;
+}
+
+/* A saved key: only its mask (or, when shown, its value) is displayed. */
+.quicker-api__channel-key-row > .quicker-api__channel-key-input[readonly] {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+    cursor: default;
+    opacity: 0.8;
+}
+
+.quicker-api__channel-key-row.is-off > .quicker-api__channel-key-input {
+    opacity: 0.45;
+}
+
+/* Struck through only when switched off in a rotating pool; without rotation the other keys are spares. */
+.quicker-api__channel-keys[data-mode='rotate'] > .quicker-api__channel-key-row.is-off > .quicker-api__channel-key-input {
+    text-decoration: line-through;
+}
+
+.quicker-api__channel-key-row > .quicker-api__channel-badge {
+    flex: 0 0 auto;
+}
+
+/* A switch without its pill: the per-key switch of a row. With rotation off the
+   same control is a radio, so that one key is in use at a time. */
+.quicker-api__switch > input[type='radio'].quicker-api__switch-input {
+    position: absolute;
+    inset: 0;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+    transform: none;
+    opacity: 0;
+    pointer-events: none;
+    appearance: none;
+}
+
+.quicker-api__switch.is-bare,
+.quicker-api__switch.is-bare:has(.quicker-api__switch-input:checked) {
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+}
+
+/* A single key has nothing to choose between. */
+.quicker-api__channel-keys.is-solo .quicker-api__switch {
+    display: none;
+}
+
+.quicker-api__channel-key-paste {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.5rem;
+    border: 1px dashed color-mix(in srgb, var(--SmartThemeQuoteColor) 55%, var(--SmartThemeBorderColor));
+    border-radius: 8px;
+}
+
+.quicker-api__channel-key-paste > textarea.quicker-api__channel-key-paste-input {
+    height: auto;
+    min-height: 5rem;
+    max-height: 12rem;
+    overflow-x: auto;
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.9em;
+    resize: vertical;
+    white-space: pre;
+}
+
+.quicker-api__channel-key-paste-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 0.35rem;
 }
 
-.quicker-api__channel-key > .text_pole {
+.quicker-api__channel-key-paste-foot > small {
+    min-width: 0;
+    flex: 1 1 8rem;
+    opacity: 0.7;
+}
+
+/* "轮询 ON/OFF" and the way the keys rotate. */
+.quicker-api__channel-rotation {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.8rem;
+    padding-top: 0.15rem;
+}
+
+.quicker-api__rotation-switch {
+    padding: 0.28rem 0.7rem 0.28rem 0.35rem;
+    font-size: 0.9em;
+}
+
+.quicker-api__switch-state {
+    min-width: 2.2em;
+    padding: 0.05rem 0.35rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 22%, transparent);
+    color: var(--SmartThemeBodyColor);
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-align: center;
+    transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.quicker-api__switch:has(.quicker-api__switch-input:checked) .quicker-api__switch-state {
+    background: var(--quicker-api-success);
+    color: var(--SmartThemeBlurTintColor, #111);
+    opacity: 1;
+}
+
+.quicker-api__channel-rotation-mode {
+    display: inline-flex;
+    min-width: 0;
+    flex: 0 1 15rem;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    font-weight: normal;
+}
+
+.quicker-api__channel-rotation-mode > span {
+    flex: 0 0 auto;
+    font-size: 0.82em;
+    opacity: 0.7;
+}
+
+.quicker-api__channel-field .quicker-api__channel-rotation-mode > select.text_pole {
+    width: auto;
+    min-width: 7rem;
     flex: 1 1 auto;
+}
+
+.quicker-api__channel-rotation-mode:has(select:disabled) {
+    opacity: 0.5;
 }
 
 .quicker-api__channel-hint {
@@ -2749,6 +3143,21 @@ dialog.popup:has(.quicker-api__channels) .popup-controls .menu_button {
 
     .quicker-api__channel-delete > span {
         display: none;
+    }
+
+    /* Icons only, so that the key actions stay on one line. */
+    .quicker-api__channel-key-actions > .menu_button > span {
+        display: none;
+    }
+
+    .quicker-api__channel-key-actions > .menu_button,
+    .quicker-api__channel-key-row > .menu_button {
+        min-width: 2rem;
+        min-height: 2rem;
+    }
+
+    .quicker-api__channel-rotation-mode {
+        flex: 1 1 10rem;
     }
 
     .quicker-api__channels .quicker-api__model-list {
