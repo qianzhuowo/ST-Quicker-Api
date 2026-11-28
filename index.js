@@ -115,6 +115,9 @@ const DEFAULT_SETTINGS = {
     // switch the provider. When on, a preset applies and records its bound
     // Profile (presetBindings/presetModels are kept either way).
     presetLink: false,
+    // On by default: the profile list shows only the profile names, without
+    // the "[format]" prefix.
+    hideProfileFormat: true,
     presetBindings: {},
     presetModels: {},
     migratedFromCustomOpenAIProfiles: false,
@@ -612,6 +615,7 @@ function initializeSettings() {
     value.blockedSecretKeys = value.blockedSecretKeys && typeof value.blockedSecretKeys === 'object' ? value.blockedSecretKeys : {};
     value.nativeUi = value.nativeUi === true;
     value.presetLink = value.presetLink === true;
+    value.hideProfileFormat = value.hideProfileFormat !== false;
     value.quickActionPlacement = ['leftSendForm', 'rightSendForm', 'qrButtons', 'disabled'].includes(value.quickActionPlacement)
         ? value.quickActionPlacement
         : 'rightSendForm';
@@ -710,7 +714,7 @@ function toolbarHtml() {
                 </button>
                 <label class="quicker-api__switch quicker-api__mode-switch" for="quicker_api_mode" title="关闭后切回 SillyTavern 原生界面">
                     <input id="quicker_api_mode" class="quicker-api__switch-input" type="checkbox" role="switch" checked />
-                    <span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>
+                    <span class="quicker-api__switch-dot" aria-hidden="true"></span>
                     <span class="quicker-api__switch-label">插件启用</span>
                 </label>
             </div>
@@ -771,8 +775,13 @@ function toolbarHtml() {
                     <button id="quicker_api_additional_parameters" class="menu_button quicker-api__text-button" type="button" title="打开 SillyTavern 原生附加参数编辑器"><i class="fa-solid fa-sliders"></i><span>附加参数</span></button>
                     <label class="quicker-api__switch quicker-api__preset-link" for="quicker_api_preset_link" title="开启后：切换原生预设会应用它绑定的 API 配置，保存预设或 API 配置会记录绑定。关闭时：预设只管提示词与参数，不改供应商、URL 与模型。">
                         <input id="quicker_api_preset_link" class="quicker-api__switch-input" type="checkbox" role="switch" />
-                        <span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>
+                        <span class="quicker-api__switch-dot" aria-hidden="true"></span>
                         <span class="quicker-api__switch-label">联动预设</span>
+                    </label>
+                    <label class="quicker-api__switch quicker-api__hide-format" for="quicker_api_hide_profile_format" title="开启后：配置下拉框只显示配置名称，不显示前面的 [格式]。">
+                        <input id="quicker_api_hide_profile_format" class="quicker-api__switch-input" type="checkbox" role="switch" />
+                        <span class="quicker-api__switch-dot" aria-hidden="true"></span>
+                        <span class="quicker-api__switch-label">隐藏格式</span>
                     </label>
                 </div>
             </div>
@@ -2047,13 +2056,21 @@ function renderProfileEditor(profile = selectedProfile(), modelOverride = null) 
     editorModelBaseline = getEditorModel(format);
 }
 
+// The full label stays in the tooltip, so the format is still visible when
+// the list hides it.
+function labelProfileOption(option, profile) {
+    const name = `${profile.name}${profile.draft ? '（未保存）' : ''}`;
+    const full = `[${FORMATS[profile.format].label}] ${name}`;
+    return option.text(settings().hideProfileFormat ? name : full).attr('title', full);
+}
+
 function renderProfiles(preferredId = null) {
     const select = $('#quicker_api_profile_select').empty().append($('<option>').val('').text('— 选择 API 配置 —'));
     for (const profile of [...profiles()].sort((a, b) => a.name.localeCompare(b.name))) {
         if (!isFormatSupported(profile.format) && !$('#quicker_api_format option').toArray().some(option => option.value === profile.format)) {
             $('#quicker_api_format').append($('<option disabled>').val(profile.format).text(`${FORMATS[profile.format].label}（当前宿主不支持）`));
         }
-        select.append($('<option>').val(profile.id).text(`[${FORMATS[profile.format].label}] ${profile.name}${profile.draft ? '（未保存）' : ''}`));
+        select.append(labelProfileOption($('<option>').val(profile.id), profile));
     }
     const selectedId = preferredId ?? settings().selectedProfileId ?? '';
     select.val(profiles().some(profile => profile.id === selectedId) ? selectedId : '');
@@ -3184,7 +3201,7 @@ async function buildBackup(includeSecrets) {
             quickUrls: structuredClone(settings().quickUrls),
             presetBindings: { ...settings().presetBindings },
             presetModels: structuredClone({ ...settings().presetModels }),
-            preferences: { quickActionPlacement: settings().quickActionPlacement, quickMenuMode: settings().quickMenuMode, presetLink: settings().presetLink === true },
+            preferences: { quickActionPlacement: settings().quickActionPlacement, quickMenuMode: settings().quickMenuMode, presetLink: settings().presetLink === true, hideProfileFormat: settings().hideProfileFormat !== false },
         },
     };
 }
@@ -3385,6 +3402,8 @@ async function restoreBackup(backup, choice) {
         settings().presetLink = backup.preferences.presetLink === true;
         $('#quicker_api_preset_link').prop('checked', settings().presetLink);
         if (!settings().presetLink) clearNativePresetSaveIntent();
+        if (backup.preferences.hideProfileFormat !== undefined) settings().hideProfileFormat = backup.preferences.hideProfileFormat !== false;
+        $('#quicker_api_hide_profile_format').prop('checked', settings().hideProfileFormat);
     }
 
     if (!settings().selectedProfileId && first) settings().selectedProfileId = first.id;
@@ -3451,7 +3470,7 @@ async function manageBackup() {
             backup.quickUrls.length ? option('quickUrls', `快捷 URL（${backup.quickUrls.length} 个）`) : null,
             bindingCount ? option('presetBindings', `预设绑定（${bindingCount} 个）`) : null,
             // Preferences replace the current ones, so they are only preselected on an empty install.
-            backup.preferences ? option('preferences', '偏好设置（便捷入口位置、联动预设开关）', !profiles().length) : null,
+            backup.preferences ? option('preferences', '偏好设置（便捷入口位置、联动预设与隐藏格式开关）', !profiles().length) : null,
         );
         const restoreButton = $('<button type="button" class="menu_button quicker-api__text-button quicker-api__save-button" data-backup="restore"><i class="fa-solid fa-rotate-left"></i><span>恢复所选</span></button>');
         restoreButton.on('click', async () => {
@@ -4507,7 +4526,7 @@ async function manageChannels(initialId = settings().selectedProfileId) {
             $('<input class="text_pole quicker-api__channel-key-input" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">'),
             $('<label class="quicker-api__switch is-bare">').append(
                 $('<input class="quicker-api__switch-input" type="checkbox">'),
-                $('<span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>'),
+                $('<span class="quicker-api__switch-dot" aria-hidden="true"></span>'),
             ),
             $('<button type="button" class="menu_button quicker-api__channel-key-remove"><i class="fa-solid fa-trash-can"></i></button>'),
         );
@@ -5714,7 +5733,7 @@ async function manageQuickActions() {
         const modelControl = $('<div class="quicker-api__quick-model-control">').append(buildModelPicker(quickModelPicker), clearModel);
         const followSwitch = $(`<label class="quicker-api__switch" for="quicker_api_quick_follow_channel" title="开：从其他渠道或“格式”里选模型，会把“配置”一起改成该渠道。关：只写模型名，“配置”保持你自己选的（可为空，运行时作用于当时正在使用的连接）。">
                 <input id="quicker_api_quick_follow_channel" class="quicker-api__switch-input" type="checkbox" role="switch" />
-                <span class="quicker-api__switch-track" aria-hidden="true"><span class="quicker-api__switch-thumb"></span></span>
+                <span class="quicker-api__switch-dot" aria-hidden="true"></span>
                 <span class="quicker-api__switch-label">连同渠道一起切换</span>
             </label>`);
         // A div, not a <label>: the title row holds the switch's own label.
@@ -6594,6 +6613,16 @@ function bindEvents() {
         scheduleSettingsSave();
         renderStatus();
     });
+    // Relabel in place: rebuilding the list would also re-render the editor.
+    $('#quicker_api_hide_profile_format').on('change', function () {
+        settings().hideProfileFormat = $(this).prop('checked') === true;
+        scheduleSettingsSave();
+        const byId = new Map(profiles().map(profile => [profile.id, profile]));
+        $('#quicker_api_profile_select option').each(function () {
+            const profile = byId.get(this.value);
+            if (profile) labelProfileOption($(this), profile);
+        });
+    });
     $('#quicker_api_save').on('click', () => void enqueueOperation(saveSelectedProfile));
     $('#quicker_api_rename').on('click', renameSelectedProfile);
     $('#quicker_api_copy').on('click', copySelectedProfile);
@@ -6690,6 +6719,7 @@ function renderPanelMode() {
         .prop('checked', !nativeUi)
         .closest('label').attr('title', nativeUi ? '开启后切回 Quicker Api 界面' : '关闭后切回 SillyTavern 原生界面');
     $('#quicker_api_preset_link').prop('checked', presetLinkEnabled());
+    $('#quicker_api_hide_profile_format').prop('checked', settings().hideProfileFormat !== false);
 }
 
 // Native UI hands the connection to the host's own controls. Switching back

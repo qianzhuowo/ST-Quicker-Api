@@ -381,7 +381,7 @@ export async function runKeyPoolRegressions({ page, state, log }) {
     await openManager('solo-profile');
     assert.deepEqual(await run(`(() => { const box = $('${detail} [data-role="key-field"]'); const rotation = box.find('[data-role="key-rotation"]');
         const middles = rotation.children().toArray().map(item => { const rect = item.getBoundingClientRect(); return rect.top + rect.height / 2; });
-        return [box.children().toArray().map(item => item.dataset.role || item.className.split(' ')[0]), rotation.find('.quicker-api__switch-track').length, Math.abs(middles[0] - middles[1]) < 4,
+        return [box.children().toArray().map(item => item.dataset.role || item.className.split(' ')[0]), rotation.find('.quicker-api__switch-dot').length, Math.abs(middles[0] - middles[1]) < 4,
             rotation[0].getBoundingClientRect().bottom <= box.find('[data-role="key-list"]')[0].getBoundingClientRect().top, box.find('.quicker-api__channel-key-row .quicker-api__channel-badge').length]; })()`),
         [['quicker-api__channel-key-head', 'key-rotation', 'key-paste', 'key-list'], 0, true, true, 0]);
     assert.deepEqual(await liveRows(), [false, false, false], 'a rotating channel that is not applied marks no key');

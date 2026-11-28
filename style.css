@@ -132,7 +132,8 @@
     display: none !important;
 }
 
-/* "插件启用" / "联动预设": compact pill switches. The host styles every
+/* "鎻掍欢鍚敤" / "鑱斿姩棰勮" / "闅愯棌鏍煎紡": compact switches 鈥?a status dot and a label;
+   when on, the dot and the border turn green. The host styles every
    checkbox (input[type='checkbox']), so the hidden input needs a selector that
    outranks it, or it keeps taking space at the switch's left edge. */
 .quicker-api__switch {
@@ -143,7 +144,7 @@
     gap: 0.4rem;
     width: auto;
     margin: 0;
-    padding: 0.2rem 0.6rem 0.2rem 0.3rem;
+    padding: 0.2rem 0.6rem 0.2rem 0.45rem;
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 999px;
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 80%, transparent);
@@ -176,26 +177,13 @@
     pointer-events: none;
 }
 
-.quicker-api__switch-track {
-    position: relative;
+.quicker-api__switch-dot {
     flex: 0 0 auto;
-    width: 1.9rem;
-    height: 1.1rem;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--SmartThemeBodyColor) 22%, transparent);
-    transition: background-color 0.18s ease;
-}
-
-.quicker-api__switch-thumb {
-    position: absolute;
-    top: 0.15rem;
-    left: 0.15rem;
-    width: 0.8rem;
-    height: 0.8rem;
+    width: 0.55rem;
+    height: 0.55rem;
     border-radius: 50%;
-    background: var(--SmartThemeBodyColor);
-    box-shadow: 0 1px 3px #0006;
-    transition: transform 0.18s ease;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 35%, transparent);
+    transition: background-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .quicker-api__switch-label {
@@ -207,12 +195,9 @@
     background: color-mix(in srgb, var(--quicker-api-success) 14%, var(--SmartThemeBlurTintColor));
 }
 
-.quicker-api__switch-input:checked + .quicker-api__switch-track {
+.quicker-api__switch-input:checked + .quicker-api__switch-dot {
     background: var(--quicker-api-success);
-}
-
-.quicker-api__switch-input:checked + .quicker-api__switch-track > .quicker-api__switch-thumb {
-    transform: translateX(0.8rem);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--quicker-api-success) 28%, transparent);
 }
 
 .quicker-api__switch:has(.quicker-api__switch-input:checked) .quicker-api__switch-label {
@@ -525,7 +510,7 @@
     opacity: 1;
 }
 
-/* 保留原生节点与事件，只隐藏三类来源的重复表单及原生反向代理区。 */
+/* 淇濈暀鍘熺敓鑺傜偣涓庝簨浠讹紝鍙殣钘忎笁绫绘潵婧愮殑閲嶅琛ㄥ崟鍙婂師鐢熷弽鍚戜唬鐞嗗尯銆?*/
 #custom_form.quicker-api__native-provider,
 #claude_form.quicker-api__native-provider,
 #makersuite_form.quicker-api__native-provider,
@@ -975,7 +960,7 @@ dialog.popup:has(.quicker-api__model-manager) .popup-controls .menu_button:focus
     }
 }
 
-/* v3.4 便捷方案：静态背景，不使用 glow、位移或 transform。 */
+/* v3.4 渚挎嵎鏂规锛氶潤鎬佽儗鏅紝涓嶄娇鐢?glow銆佷綅绉绘垨 transform銆?*/
 .quicker-api__quick-entry {
     box-shadow: none !important;
     filter: none !important;
@@ -2155,7 +2140,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     }
 }
 
-/* v3.10 便捷菜单：当前正在使用的方案 */
+/* v3.10 渚挎嵎鑿滃崟锛氬綋鍓嶆鍦ㄤ娇鐢ㄧ殑鏂规 */
 .quicker-api__quick-menu > .list-group-item.is-active {
     border-left: 3px solid var(--SmartThemeQuoteColor);
     background: color-mix(in srgb, var(--SmartThemeQuoteColor) 18%, transparent);
@@ -2174,7 +2159,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     font-size: 0.85em;
 }
 
-/* v3.10 便捷方案：预设参数 */
+/* v3.10 渚挎嵎鏂规锛氶璁惧弬鏁?*/
 .quicker-api__quick-params {
     min-width: 0;
     margin: 0;
@@ -2271,7 +2256,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     }
 }
 
-/* v3.10 下拉列表：清理失效收藏 */
+/* v3.10 涓嬫媺鍒楄〃锛氭竻鐞嗗け鏁堟敹钘?*/
 .quicker-api__model-prune.has-stale {
     border-color: color-mix(in srgb, orange 70%, var(--SmartThemeBorderColor));
     color: orange;
@@ -2282,7 +2267,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     cursor: default;
 }
 
-/* v3.10.1 引用失效的便捷方案 */
+/* v3.10.1 寮曠敤澶辨晥鐨勪究鎹锋柟妗?*/
 .quicker-api__quick-item.is-broken .quicker-api__quick-select,
 .quicker-api__quick-menu > .list-group-item.is-broken {
     color: orange;
@@ -2292,9 +2277,8 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     margin-right: 0.35rem;
 }
 
-/* v3.10.1 手机端：宿主 Quick Reply 在 max-width:1000px 时给
-   .list-group .list-group-item.ctx-item 加了 padding:1em，会撑大便捷菜单的行距。
-   这里用更高优先级恢复与 PC 一致的紧凑间距。 */
+/* v3.10.1 鎵嬫満绔細瀹夸富 Quick Reply 鍦?max-width:1000px 鏃剁粰
+   .list-group .list-group-item.ctx-item 鍔犱簡 padding:1em锛屼細鎾戝ぇ渚挎嵎鑿滃崟鐨勮璺濄€?   杩欓噷鐢ㄦ洿楂樹紭鍏堢骇鎭㈠涓?PC 涓€鑷寸殑绱у噾闂磋窛銆?*/
 .list-group.quicker-api__quick-menu > .list-group-item.ctx-item {
     padding: 5px;
 }
@@ -2310,7 +2294,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     opacity: 1 !important;
 }
 
-/* "格式" view rows: model with its provider underneath. */
+/* "鏍煎紡" view rows: model with its provider underneath. */
 .quicker-api__model-option--provider .quicker-api__model-option-name {
     display: flex;
     min-width: 0;
@@ -2698,7 +2682,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     color: var(--quicker-api-danger);
 }
 
-/* "更多操作": copy, remove repeats, clear. */
+/* "鏇村鎿嶄綔": copy, remove repeats, clear. */
 .quicker-api__channel-key-more {
     position: relative;
     display: flex;
@@ -2845,7 +2829,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     text-decoration: line-through;
 }
 
-/* A switch without its pill: the per-key switch of a row. With rotation off the
+/* A switch without its border: the per-key switch of a row, just the dot. With rotation off the
    same control is a radio, so that one key is in use at a time. */
 .quicker-api__switch > input[type='radio'].quicker-api__switch-input {
     position: absolute;
@@ -2865,7 +2849,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
 
 .quicker-api__switch.is-bare,
 .quicker-api__switch.is-bare:has(.quicker-api__switch-input:checked) {
-    padding: 0;
+    padding: 0.35rem;
     border: 0;
     border-radius: 999px;
     background: none;
@@ -2913,7 +2897,7 @@ dialog.popup:has(.quicker-api__placement-popup) .popup-controls {
     opacity: 0.7;
 }
 
-/* "轮询 ON/OFF" and the way the keys rotate, on one line. */
+/* "杞 ON/OFF" and the way the keys rotate, on one line. */
 .quicker-api__channel-rotation {
     display: flex;
     min-width: 0;

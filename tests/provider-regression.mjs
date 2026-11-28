@@ -283,7 +283,7 @@ async function runChannelRegressions({ run, state, settle, log }) {
     assert.deepEqual(await run(`[normalizeQuickAction({}).followChannel, normalizeQuickAction({followChannel:false}).followChannel]`), [true, false]);
     // The switch sits on the "模型" title row, and turns green when on.
     const switchLook = await run(`(() => { const label = document.querySelector('label[for="quicker_api_quick_follow_channel"]'); const head = label.closest('.quicker-api__quick-field-head');
-        const title = head?.querySelector(':scope > span'); const track = () => { const el = label.querySelector('.quicker-api__switch-track'); el.style.transition = 'none'; const n = getComputedStyle(el).backgroundColor.match(/[\\d.]+/g).map(Number); const k = n.slice(0, 3).every(v => v <= 1) ? 255 : 1; return n.slice(0, 3).map(v => Math.round(v * k)).join(','); };
+        const title = head?.querySelector(':scope > span'); const track = () => { const el = label.querySelector('.quicker-api__switch-dot'); el.style.transition = 'none'; const n = getComputedStyle(el).backgroundColor.match(/[\\d.]+/g).map(Number); const k = n.slice(0, 3).every(v => v <= 1) ? 255 : 1; return n.slice(0, 3).map(v => Math.round(v * k)).join(','); };
         const off = track(); const input = document.getElementById('quicker_api_quick_follow_channel'); input.checked = true; const on = track(); input.checked = false;
         const a = title.getBoundingClientRect(), b = label.getBoundingClientRect();
         return [title.textContent, Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2) < 6, on !== off, (([r, g, b]) => g > r + 40 && g > b + 40)(on.split(',').map(Number)), getComputedStyle(document.body).getPropertyValue('--quicker-api-success').trim() !== '']; })()`);
@@ -298,11 +298,18 @@ async function runChannelRegressions({ run, state, settle, log }) {
     assert.equal(await run('settings().presetLink'), false);
     log('the preset link switch is a labelled switch control that toggles the setting');
 
+    const hideFormat = await run(`(() => { const option = () => $('#quicker_api_profile_select option').filter((_, item) => item.value).first(); const input = $('#quicker_api_hide_profile_format');
+        const on = [settings().hideProfileFormat, input.prop('checked'), option().text().startsWith('['), option().attr('title').startsWith('[')];
+        input.prop('checked', false).trigger('change'); const off = [settings().hideProfileFormat, option().text().startsWith('['), option().attr('title') === option().text()];
+        input.prop('checked', true).trigger('change'); return [on, off, option().text().startsWith('[')]; })()`);
+    assert.deepEqual(hideFormat, [[true, true, false, true], [false, true, true], false]);
+    log('the hide-format switch is on by default and shows profile names without the [format] prefix');
+
     // Both pill switches hug their content: the host's checkbox styling must not
     // leave the hidden input occupying space at the left edge.
-    const switches = await run(`[...document.querySelectorAll('.quicker-api__switch')].map(label => { const r = label.getBoundingClientRect(); const track = label.querySelector('.quicker-api__switch-track').getBoundingClientRect(); const input = label.querySelector('input').getBoundingClientRect();
+    const switches = await run(`[...document.querySelectorAll('.quicker-api__switch')].map(label => { const r = label.getBoundingClientRect(); const track = label.querySelector('.quicker-api__switch-dot').getBoundingClientRect(); const input = label.querySelector('input').getBoundingClientRect();
         return { text: label.textContent.trim(), gap: Math.round(track.left - r.left), input: Math.round(input.width), icon: label.querySelectorAll('i').length }; })`);
-    assert.deepEqual(switches.map(item => item.text), ['\u63d2\u4ef6\u542f\u7528', '\u8054\u52a8\u9884\u8bbe']);
+    assert.deepEqual(switches.map(item => item.text), ['\u63d2\u4ef6\u542f\u7528', '\u8054\u52a8\u9884\u8bbe', '\u9690\u85cf\u683c\u5f0f']);
     assert.ok(switches.every(item => item.gap <= 8 && item.input <= 1 && item.icon === 0), JSON.stringify(switches));
     log('插件启用 and 联动预设 share one compact switch style without an extra icon or left gap');
 }
